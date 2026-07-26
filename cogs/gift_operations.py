@@ -20,6 +20,8 @@ from .gift_operationsapi import GiftCodeAPI
 from .pimp_my_bot import theme, safe_edit_message
 from . import gift_redemption
 from . import gift_state_resolver
+from . import alliance_member_states
+from . import process_queue
 from . import gift_channels
 from . import gift_settings
 from .gift_views import GiftView
@@ -244,7 +246,17 @@ class GiftOperations(commands.Cog):
                     'gift_redeem',
                     lambda process: gift_redemption.handle_gift_redeem_process(self, process)
                 )
-                self.logger.info("GiftOps: Registered gift_validate and gift_redeem handlers with ProcessQueue")
+                process_queue_cog.register_handler(
+                    'gift_redeem_member',
+                    lambda process: gift_redemption.handle_member_redeem_process(self, process)
+                )
+                process_queue_cog.register_handler(
+                    'state_resolve',
+                    lambda process: gift_redemption.handle_state_resolve_process(self, process)
+                )
+                self.logger.info(
+                    "GiftOps: Registered gift_validate, gift_redeem, gift_redeem_member "
+                    "and state_resolve handlers with ProcessQueue")
             else:
                 self.logger.error("GiftOps: ProcessQueue cog not found, gift code operations will not work")
 
@@ -378,13 +390,67 @@ class GiftOperations(commands.Cog):
         return {"bound": bound, "multistate": flagged}
 
     def assign_alliance_state_to_missing(self):
-        """Fast no-API backfill: NULL-kid members inherit their alliance's bound kingdom."""
-        return gift_state_resolver.assign_alliance_kid_to_missing()
+        """Fast no-API backfill: NULL-kid members inherit their alliance's bound kingdom,
+        then catch up on the codes they missed while kingdom-less. Returns (assigned, caught_up)."""
+        fids = gift_state_resolver.assign_alliance_kid_to_missing()
+        caught = 0
+        for fid in fids:
+            try:
+                if gift_redemption.enqueue_member_redemption(self, fid):
+                    caught += 1
+            except Exception as e:
+                self.logger.warning(f"GiftOps: could not queue catch-up for FID {fid}: {e}")
+        return len(fids), caught
 
-    async def resolve_remaining_missing_states(self, *, deep_sweep_max=0):
-        """API-probe the members still missing a kingdom and persist what we find."""
-        fids = await asyncio.to_thread(gift_state_resolver.fids_missing_state)
-        return await gift_state_resolver.resolve_and_persist(self, fids, deep_sweep_max=deep_sweep_max)
+    def queue_state_resolve(self, scope):
+        """Queue the API state probe for 'mismatch' or 'missing' members. Returns the
+        number of members queued, or None if that scope is already queued/running.
+
+        Never run this inline - a single member can take 25+ minutes. On the queue it
+        sits below every other job and yields between probes, so an incoming gift code
+        always redeems first."""
+        process_queue_cog = self.bot.get_cog('ProcessQueue')
+        if not process_queue_cog:
+            self.logger.error("GiftOps: ProcessQueue cog not found; cannot queue state resolution")
+            return None
+        if self.state_resolve_status(scope) is not None:
+            return None
+        targets = gift_redemption._state_resolve_targets(scope)
+        if not targets:
+            return 0
+        process_queue_cog.enqueue(
+            'state_resolve', process_queue.STATE_RESOLVE,
+            details={'scope': scope, 'remaining': targets, 'total': len(targets),
+                     'resolved': 0, 'unresolved': 0},
+        )
+        self.logger.info(f"GiftOps: queued state resolution ({scope}) for {len(targets)} member(s)")
+        return len(targets)
+
+    def state_resolve_status(self, scope):
+        """Live progress for a queued or running scope, or None when it isn't queued."""
+        process_queue_cog = self.bot.get_cog('ProcessQueue')
+        if not process_queue_cog:
+            return None
+        for existing in process_queue_cog.get_queued_processes_by_action(
+                'state_resolve', statuses=('queued', 'active')):
+            if existing['details'].get('scope') == scope:
+                return {**existing['details'], 'status': existing['status']}
+        return None
+
+    def member_catchup_status(self):
+        """Pending code catch-ups: {'members': n, 'codes': n, 'done': n} or None when idle."""
+        process_queue_cog = self.bot.get_cog('ProcessQueue')
+        if not process_queue_cog:
+            return None
+        jobs = process_queue_cog.get_queued_processes_by_action(
+            'gift_redeem_member', statuses=('queued', 'active'))
+        if not jobs:
+            return None
+        return {
+            'members': len(jobs),
+            'codes': sum(len(j['details'].get('codes') or []) for j in jobs),
+            'done': sum(j['details'].get('done', 0) for j in jobs),
+        }
 
     async def _notify_state_migration(self):
         """Once per boot, DM global admins if member kingdoms need attention"""
@@ -483,7 +549,7 @@ class GiftOperations(commands.Cog):
         return await gift_settings.show_redemption_summary(self, interaction)
 
     async def show_state_management(self, interaction):
-        return await gift_settings.show_state_management(self, interaction)
+        return await alliance_member_states.show_state_management(self, interaction)
 
     async def setup_giftcode_auto(self, interaction):
         return await gift_settings.setup_giftcode_auto(self, interaction)

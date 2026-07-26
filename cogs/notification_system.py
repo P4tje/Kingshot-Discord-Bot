@@ -2025,7 +2025,7 @@ class EmbedEditorView(discord.ui.View):
             # Sample values for preview - use actual event data when available
             example_time = "30 minutes"
             example_name = self.event_type if self.event_type else "Bear Trap"
-            example_emoji = get_event_icon(self.event_type) if self.event_type else "🐻"
+            example_emoji = get_event_icon(self.event_type) if self.event_type else f"{theme.bearTrapIcon}"
             example_event_time = f"{self.hour:02d}:{self.minute:02d}"
             example_date = self.start_date.strftime("%b %d") if self.start_date else "Dec 06"
 
@@ -2448,7 +2448,7 @@ class EventTypeSelectView(discord.ui.View):
             # Sample values for preview
             example_time = "30 minutes"
             example_name = self.selected_event_type if self.selected_event_type else "Event"
-            example_emoji = get_event_icon(self.selected_event_type) if self.selected_event_type else "📅"
+            example_emoji = get_event_icon(self.selected_event_type) if self.selected_event_type else f"{theme.calendarIcon}"
             example_event_time = f"{self.hour:02d}:{self.minute:02d}"
             example_date = self.start_date.strftime("%b %d") if self.start_date else "Dec 06"
 
@@ -3564,7 +3564,7 @@ class BearTrapView(discord.ui.View):
 
                     class PreviewButton(discord.ui.Button):
                         def __init__(self, cog, notification_id):
-                            super().__init__(label="👀 Preview", style=discord.ButtonStyle.primary)
+                            super().__init__(label=f"{theme.eyesIcon} Preview", style=discord.ButtonStyle.primary)
                             self.cog = cog
                             self.notification_id = notification_id
 
@@ -3586,7 +3586,7 @@ class BearTrapView(discord.ui.View):
                                 # Sample values for preview variable replacement
                                 example_time = "30 minutes"
                                 example_name = event_type if event_type else "Event"
-                                example_emoji = get_event_icon(event_type) if event_type else "📅"
+                                example_emoji = get_event_icon(event_type) if event_type else f"{theme.calendarIcon}"
                                 example_event_time = f"{hours:02d}:{minutes:02d}"
                                 try:
                                     next_dt = datetime.fromisoformat(next_notification.replace("+00:00", ""))
@@ -3697,7 +3697,7 @@ class BearTrapView(discord.ui.View):
 
                     class ShowCodeButton(discord.ui.Button):
                         def __init__(self, embed_json):
-                            super().__init__(label="💾 Show Code", style=discord.ButtonStyle.secondary)
+                            super().__init__(label=f"{theme.saveIcon} Show Code", style=discord.ButtonStyle.secondary)
                             self.embed_json = embed_json
 
                         async def callback(self, interaction: discord.Interaction):
@@ -3708,7 +3708,7 @@ class BearTrapView(discord.ui.View):
 
                     class AdvancedSettingsButton(discord.ui.Button):
                         def __init__(self, cog, notification_id):
-                            super().__init__(label="🧹 Message Cleanup", style=discord.ButtonStyle.secondary)
+                            super().__init__(label=f"{theme.cleanIcon} Message Cleanup", style=discord.ButtonStyle.secondary)
                             self.cog = cog
                             self.notification_id = notification_id
 

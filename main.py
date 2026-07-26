@@ -173,6 +173,14 @@ if sys.prefix == sys.base_prefix and not should_skip_venv():
             startup.phase_start("Setting up virtual environment")
             subprocess.check_call([sys.executable, "-m", "venv", venv_path], timeout=300)
 
+            # 3.12+ venvs seed only pip; source builds need setuptools.
+            try:
+                subprocess.run([venv_python_name, "-m", "pip", "install", "--upgrade",
+                                "setuptools", "wheel"], timeout=300,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
             if sys.platform == "win32":
                 startup.venv_instructions(venv_python_name, sys.platform)
                 sys.exit(0)
@@ -301,7 +309,9 @@ def cleanup_removed_packages():
             pass
         return result
 
-    removed = _read_pkgs("requirements.old") - _read_pkgs("requirements.txt")
+    # Never uninstall the build toolchain - removing setuptools wedged updates once.
+    PROTECTED = {"setuptools", "pip", "wheel"}
+    removed = _read_pkgs("requirements.old") - _read_pkgs("requirements.txt") - PROTECTED
     if removed:
         debug = "--verbose" in sys.argv or "--debug" in sys.argv
         print(f"Found {len(removed)} packages to remove from requirements: {', '.join(removed)}")
@@ -785,12 +795,22 @@ if __name__ == "__main__":
         try:
             if debug:
                 subprocess.check_call(full_command, timeout=1200, env=_pip_env())
-            else:
-                subprocess.check_call(full_command, timeout=1200, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_pip_env())
+                return True
+            # Capture output so a failure shows pip's reason, not a bare exit code.
+            result = subprocess.run(full_command, timeout=1200, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, env=_pip_env())
+            if result.returncode != 0:
+                tail = (result.stdout or "").strip().splitlines()[-15:]
+                startup.phase_fail("Update failed",
+                                   details=["Failed to install requirements (pip "
+                                            f"exit {result.returncode}):", *tail],
+                                   fix="pip install -r requirements.txt")
+                return False
             return True
         except Exception as e:
-            if debug:
-                print(f"Failed to install requirements: {e}")
+            startup.phase_fail("Update failed",
+                               details=[f"Failed to install requirements: {e}"],
+                               fix="pip install -r requirements.txt")
             return False
 
     def is_legacy_version():
@@ -960,7 +980,7 @@ if __name__ == "__main__":
                                 # Now cleanup removed packages (comparing old vs new)
                                 cleanup_removed_packages()
                             else:
-                                startup.phase_fail("Update failed", details=["Failed to install requirements"])
+                                # install_packages already reported pip's real error.
                                 return
                             
                             # Remove the requirements.txt from update folder after copying
@@ -1343,6 +1363,7 @@ if __name__ == "__main__":
                 ("discord_id",              "INTEGER"),
                 ("discord_server_id",       "INTEGER"),
                 ("discord_id_updated_at",   "TEXT"),
+                ("state_mismatch_at",       "TEXT"),
             ]
             for _col, _typ in _users_columns_to_add:
                 try:
@@ -1379,6 +1400,15 @@ if __name__ == "__main__":
                 interval INTEGER
             )""")
 
+            # Per-alliance toggle: auto-remove a member detected (at gift redemption)
+            # to have left this single-kingdom alliance's kingdom. Off by default.
+            try:
+                conn_alliance.execute("SELECT auto_remove_on_transfer FROM alliancesettings LIMIT 1")
+            except sqlite3.OperationalError:
+                conn_alliance.execute(
+                    "ALTER TABLE alliancesettings ADD COLUMN auto_remove_on_transfer INTEGER DEFAULT 0"
+                )
+
             # Per-alliance gate for who can upload screenshots in the
             # Screenshot Upload channels (0 = anyone, 1 = bot admins only).
             try:
@@ -1407,6 +1437,23 @@ if __name__ == "__main__":
                     "UPDATE alliancesettings SET redemption_channel_id = channel_id"
                 )
 
+            # Sync Log is gone - inherit it as the redemption log, once only.
+            with connections["conn_settings"] as _cs:
+                _cs.execute("""CREATE TABLE IF NOT EXISTS bot_global_settings (
+                    setting_key TEXT PRIMARY KEY, setting_value TEXT)""")
+                _done = _cs.execute(
+                    "SELECT 1 FROM bot_global_settings WHERE setting_key = 'sync_log_migrated'"
+                ).fetchone()
+            if not _done:
+                conn_alliance.execute(
+                    "UPDATE alliancesettings SET redemption_channel_id = channel_id "
+                    "WHERE redemption_channel_id IS NULL AND channel_id IS NOT NULL"
+                )
+                with connections["conn_settings"] as _cs:
+                    _cs.execute(
+                        "INSERT OR REPLACE INTO bot_global_settings VALUES ('sync_log_migrated', '1')"
+                    )
+
             conn_alliance.execute("""CREATE TABLE IF NOT EXISTS alliance_list (
                 alliance_id INTEGER PRIMARY KEY,
                 name TEXT,
@@ -1432,7 +1479,7 @@ if __name__ == "__main__":
     startup.phase_ok("Database ready")
 
     async def load_cogs():
-        cogs = ["pimp_my_bot", "process_queue", "onnx_lifecycle", "bot_main_menu", "alliance_sync", "alliance", "alliance_member_operations", "bot_operations", "alliance_logs", "bot_support", "bot_health", "gift_operations", "alliance_history", "alliance_w_command", "bot_startup", "notification_system", "notification_schedule", "alliance_id_channel", "alliance_channels", "bot_backup", "notification_editor", "notification_templates", "notification_wizard", "attendance", "attendance_report", "attendance_ocr", "minister_schedule", "minister_menu", "minister_archive", "alliance_registration", "bear_track"]
+        cogs = ["pimp_my_bot", "process_queue", "onnx_lifecycle", "bot_main_menu", "alliance", "alliance_member_operations", "bot_operations", "alliance_logs", "bot_support", "bot_health", "gift_operations", "alliance_history", "alliance_w_command", "bot_startup", "notification_system", "notification_schedule", "alliance_id_channel", "alliance_channels", "bot_backup", "notification_editor", "notification_templates", "notification_wizard", "attendance", "attendance_report", "attendance_ocr", "minister_schedule", "minister_menu", "minister_archive", "alliance_registration", "bear_track"]
 
         failed_cogs = []
 

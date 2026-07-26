@@ -841,7 +841,7 @@ class NotificationSchedule(commands.Cog):
                 time_str = next_time_tz.strftime('%H:%M')
 
             # Get emoji for this event type
-            emoji = get_event_icon(event_type) if event_type else "📅"
+            emoji = get_event_icon(event_type) if event_type else f"{theme.calendarIcon}"
             event_name = event_type if event_type else "Event"
             event_time_str = next_time_tz.strftime('%H:%M')
             event_date_str = next_time_tz.strftime('%b %d')
@@ -1495,7 +1495,7 @@ class CreateBoardChannelSelectView(discord.ui.View):
                 f"**Posted in:** <#{self.display_channel_id}>\n\n"
                 "**Button Functions:**\n"
                 "• **🔢 Max Events** - Set maximum number of events displayed on the schedule\n"
-                "• **🌍 Timezone** - Select timezone for displaying event times\n"
+                f"• **{theme.globeIcon} Timezone** - Select timezone for displaying event times\n"
                 "• **🌐 User Timezone** - Show times in each user's local timezone\n"
                 "• **👁️ Show Disabled** - Include or exclude disabled notifications from the schedule\n"
                 "• **📌 Pin Message** - Automatically pin the schedule board message in the channel\n"
@@ -1864,7 +1864,7 @@ class CreateBoardSettingsView(discord.ui.View):
                     f"**Posted in:** <#{self.display_channel_id}>\n\n"
                     "**Button Functions:**\n"
                     "• **🔢 Max Events** - Set maximum number of events displayed on the schedule\n"
-                    "• **🌍 Timezone** - Select timezone for displaying event times\n"
+                    f"• **{theme.globeIcon} Timezone** - Select timezone for displaying event times\n"
                     "• **🌐 User Timezone** - Show times in each user's local timezone\n"
                     "• **👁️ Show Disabled** - Include or exclude disabled notifications from the schedule\n"
                     "• **📌 Pin Message** - Automatically pin the schedule board message in the channel\n"
@@ -2145,7 +2145,7 @@ class BoardManagementView(discord.ui.View):
 
             await interaction.response.edit_message(
                 embed=discord.Embed(
-                    title="📤 Move Board",
+                    title=f"{theme.exportIcon} Move Board",
                     description="Select where to post this schedule board:",
                     color=theme.emColor1
                 ),
@@ -2275,9 +2275,9 @@ class EditBoardSettingsView(discord.ui.View):
 
         # Build timezone description based on use_user_timezone
         if self.use_user_timezone:
-            tz_line = f"🌍 **Timezone:** {tz_display} (not used for display)\n└ Event calculations use this timezone"
+            tz_line = f"{theme.globeIcon} **Timezone:** {tz_display} (not used for display)\n└ Event calculations use this timezone"
         else:
-            tz_line = f"🌍 **Timezone:** {tz_display}\n└ Times displayed in this timezone"
+            tz_line = f"{theme.globeIcon} **Timezone:** {tz_display}\n└ Times displayed in this timezone"
 
         embed = discord.Embed(
             title=f"{theme.settingsIcon} Edit Board Settings - Board #{self.board_id}",

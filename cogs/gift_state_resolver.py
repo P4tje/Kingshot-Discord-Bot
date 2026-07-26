@@ -10,6 +10,7 @@ import hashlib
 import random
 import sqlite3
 import string
+from datetime import datetime
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -19,8 +20,13 @@ from .browser_headers import get_headers
 PER_FID_INTERVAL = 2.2      # seconds between probes on the SAME fid (per-FID limit)
 THROTTLE_BACKOFF = 4.0      # extra wait after a TOO FREQUENT (40019)
 MAX_PROBE_RETRIES = 4       # retries for a single (fid,kid) when throttled/transient
-BULK_CONCURRENCY = 6        # fids resolved in parallel (per-IP headroom)
+PROGRESS_EVERY = 30         # log a scan-progress heartbeat every N probes (~once a minute at this pace)
 TRANSFER_WINDOW = 200       # state transfers stay within ~200 IDs of the origin (same transfer group)
+SCAN_CONCURRENCY = 6        # fids scanned at once - the limit is per-FID, not per-IP
+
+
+class StateResolveInterrupted(Exception):
+    """Raised mid-sweep when the caller's `should_stop` asks the resolver to yield."""
 
 
 def _probe_code():
@@ -131,11 +137,16 @@ def _window_kids(center, width, exclude):
     return out
 
 
-async def resolve_state(cog, fid, *, window=TRANSFER_WINDOW, deep_sweep_max=0, pace=PER_FID_INTERVAL):
-    """Find `fid`'s true state, or None. Order: alliance/mate candidates, then a transfer
-    window (~200 IDs around the member's last-known/alliance state), then an optional
-    1..deep_sweep_max sweep. `pace` seconds between same-fid probes."""
+async def resolve_state(cog, fid, *, window=TRANSFER_WINDOW, deep_sweep_max=0, pace=PER_FID_INTERVAL,
+                        should_stop=None, on_progress=None, prefer=()):
+    """Find `fid`'s true state, or None. Tries alliance/mate states, then a transfer
+    window around the last-known state, then an optional 1..deep_sweep_max sweep.
+
+    A full sweep is ~400 paced probes (25+ min), so never call this on a path anyone is
+    waiting on. `should_stop()` is polled per probe and raises StateResolveInterrupted."""
     ordered = await asyncio.to_thread(_candidate_kids, fid)
+    # Long-shot first guesses; members don't all land in the same state.
+    ordered = list(ordered) + [k for k in prefer if k not in set(ordered)]
     seen = set(ordered)
     if window:
         center = await asyncio.to_thread(_reference_center, fid)
@@ -148,44 +159,37 @@ async def resolve_state(cog, fid, *, window=TRANSFER_WINDOW, deep_sweep_max=0, p
 
     session = _make_session(cog)
     code = _probe_code()
+    cog.logger.info(f"GiftOps: resolving state for FID {fid} - up to {len(ordered)} probes "
+                    f"(~{int(len(ordered) * (pace + 1)) // 60} min)")
+    probes = 0
+    next_beat = PROGRESS_EVERY
     try:
         first = True
         for kid in ordered:
             for _ in range(MAX_PROBE_RETRIES):
+                if should_stop is not None and should_stop():
+                    raise StateResolveInterrupted(fid)
                 if not first:
                     await asyncio.sleep(pace)
                 first = False
+                probes += 1
                 result = await _probe(cog, session, fid, kid, code)
                 if result == "throttle":
                     await asyncio.sleep(THROTTLE_BACKOFF)
                     continue
                 break
             if result == "match":
-                cog.logger.info(f"GiftOps: resolved state for FID {fid} -> {kid}")
+                cog.logger.info(f"GiftOps: resolved state for FID {fid} -> {kid} after {probes} probe(s)")
                 return kid
+            if probes >= next_beat:
+                cog.logger.info(f"GiftOps: FID {fid} state scan - {probes}/{len(ordered)} states checked")
+                next_beat += PROGRESS_EVERY
+                if on_progress is not None:
+                    await on_progress(probes, len(ordered))
+        cog.logger.info(f"GiftOps: no state found for FID {fid} after {probes} probe(s)")
         return None
     finally:
         session.close()
-
-
-async def resolve_states_bulk(cog, fids, *, deep_sweep_max=0, pace=PER_FID_INTERVAL,
-                              concurrency=BULK_CONCURRENCY):
-    """Resolve many fids in parallel (per-IP headroom). Returns {fid: kid} for hits only."""
-    sem = asyncio.Semaphore(concurrency)
-    results = {}
-
-    async def _one(fid):
-        async with sem:
-            try:
-                kid = await resolve_state(cog, fid, deep_sweep_max=deep_sweep_max, pace=pace)
-            except Exception as e:
-                cog.logger.warning(f"GiftOps: state resolve failed for FID {fid}: {e}")
-                kid = None
-            if kid is not None:
-                results[fid] = kid
-
-    await asyncio.gather(*(_one(f) for f in fids))
-    return results
 
 
 # --- Alliance -> state binding (majority vote over members' known kid) --------------
@@ -339,11 +343,42 @@ def auto_flag_multistate():
 
 # --- Member state backfill ----------------------------------------------------------
 
-def set_user_kid(fid, kid):
-    """Persist a resolved/assigned state for a member."""
+def set_user_kid(fid, kid, *, conn=None):
+    """Set a member's state and clear any wrong-state flag.
+    Pass `conn` to join the caller's transaction (not committed here)."""
+    sql = "UPDATE users SET kid = ?, state_mismatch_at = NULL WHERE fid = ?"
+    if conn is not None:
+        conn.execute(sql, (kid, fid))
+        return
+    with sqlite3.connect('db/users.sqlite', timeout=30.0) as own:
+        own.execute(sql, (kid, fid))
+        own.commit()
+
+
+# --- Wrong-state flag (set when redemption gets a 40020 for a member) ----------------
+
+def flag_state_mismatch(fid):
+    """Mark that the state on file for `fid` was rejected by the game."""
     with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
-        conn.execute("UPDATE users SET kid = ? WHERE fid = ?", (kid, fid))
+        conn.execute("UPDATE users SET state_mismatch_at = ? WHERE fid = ?",
+                     (datetime.now().isoformat(timespec='seconds'), fid))
         conn.commit()
+
+
+def clear_state_mismatch(fid):
+    """Drop the wrong-state flag without touching the stored state."""
+    with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
+        conn.execute("UPDATE users SET state_mismatch_at = NULL WHERE fid = ?", (fid,))
+        conn.commit()
+
+
+def fids_with_state_mismatch():
+    """[(fid, nickname, kid, alliance, flagged_at), ...] for members the game rejected."""
+    with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
+        return conn.execute(
+            "SELECT fid, nickname, kid, alliance, state_mismatch_at FROM users "
+            "WHERE state_mismatch_at IS NOT NULL ORDER BY state_mismatch_at DESC"
+        ).fetchall()
 
 
 def fids_missing_state():
@@ -363,31 +398,23 @@ def _alliance_bindings_by_str_id():
 
 
 def assign_alliance_kid_to_missing():
-    """Fast, no-API backfill: give NULL-kid members their alliance's bound state.
-    Returns the number updated. Members whose alliance is unbound stay NULL."""
+    """No-API backfill: stateless members inherit their alliance's state.
+    Returns the fids updated - they were skipped by every redemption until now."""
     bindings = _alliance_bindings_by_str_id()
     if not bindings:
-        return 0
+        return []
     with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
         rows = conn.execute(
             "SELECT fid, alliance FROM users WHERE kid IS NULL AND alliance IS NOT NULL AND alliance != ''"
         ).fetchall()
-        updated = 0
+        updated = []
         for fid, alliance in rows:
             kid = bindings.get(str(alliance))
             if kid is not None:
-                conn.execute("UPDATE users SET kid = ? WHERE fid = ?", (kid, fid))
-                updated += 1
+                set_user_kid(fid, kid, conn=conn)
+                updated.append(fid)
         conn.commit()
     return updated
-
-
-async def resolve_and_persist(cog, fids, *, deep_sweep_max=0, pace=PER_FID_INTERVAL):
-    """Resolve each fid's true state via the API probe and write the hits. Returns {fid: kid}."""
-    found = await resolve_states_bulk(cog, fids, deep_sweep_max=deep_sweep_max, pace=pace)
-    for fid, kid in found.items():
-        await asyncio.to_thread(set_user_kid, fid, kid)
-    return found
 
 
 async def verify_add_state(cog, fid, alliance_id):

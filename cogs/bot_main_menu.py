@@ -182,17 +182,19 @@ class MainMenu(commands.Cog):
             # Quick stats for the overview section
             visible_ids = [aid for aid, _, _ in alliances_with_counts]
             total_members = sum(count for _, _, count in alliances_with_counts)
-            active_syncs = 0
+            # No kingdom on file, or one the game API rejected.
+            needs_state = 0
             if visible_ids:
                 placeholders = ",".join("?" * len(visible_ids))
-                with sqlite3.connect('db/alliance.sqlite') as adb:
-                    acur = adb.cursor()
-                    acur.execute(
-                        f"SELECT COUNT(*) FROM alliancesettings "
-                        f"WHERE alliance_id IN ({placeholders}) AND interval > 0",
-                        visible_ids,
-                    )
-                    active_syncs = acur.fetchone()[0] or 0
+                try:
+                    with sqlite3.connect('db/users.sqlite', timeout=30.0) as udb:
+                        needs_state = udb.execute(
+                            f"SELECT COUNT(*) FROM users WHERE alliance IN ({placeholders}) "
+                            f"AND (kid IS NULL OR state_mismatch_at IS NOT NULL)",
+                            [str(a) for a in visible_ids],
+                        ).fetchone()[0] or 0
+                except sqlite3.Error:
+                    needs_state = 0
             servers_visible = (
                 len(self.bot.guilds) if tier in (TIER_OWNER, TIER_GLOBAL) else 1
             )
@@ -201,9 +203,11 @@ class MainMenu(commands.Cog):
                 f"{_tier_icon(tier)} **Access:** `{tier_label}`",
                 f"{theme.allianceIcon} **Alliances:** `{len(alliances_with_counts)}`",
                 f"{theme.membersIcon} **Total Members:** `{total_members}`",
-                f"{theme.refreshIcon} **Active Syncs:** "
-                f"`{active_syncs}/{len(alliances_with_counts)}`",
             ]
+            if needs_state:
+                overview_lines.append(
+                    f"{theme.warnIcon} **Missing Kingdoms:** `{needs_state}`"
+                )
             if tier in (TIER_OWNER, TIER_GLOBAL):
                 overview_lines.insert(
                     1, f"{theme.globeIcon} **Servers:** `{servers_visible}`"
@@ -215,7 +219,7 @@ class MainMenu(commands.Cog):
                 + "\n".join(overview_lines) + "\n"
                 f"{theme.lowerDivider}\n\n"
                 f"Pick an alliance from the dropdown to manage members, history, "
-                f"ID channel, activity log, and sync — or use a bulk action below. "
+                f"ID channel, and activity log, or use a bulk action below. "
                 f"Buttons greyed out are above your permission level.\n\n"
                 f"**Bulk Actions**\n"
                 f"{theme.upperDivider}\n"
@@ -225,8 +229,8 @@ class MainMenu(commands.Cog):
                 f"└ Move members between alliances\n\n"
                 f"{theme.exportIcon} **Export Members**\n"
                 f"└ Export one alliance or all of them to CSV/TSV\n\n"
-                f"{theme.refreshIcon} **Sync All**\n"
-                f"└ Unavailable - member data can no longer be refreshed automatically\n\n"
+                f"{theme.globeIcon} **Member Kingdoms**\n"
+                f"└ Fix missing or wrong kingdoms so gift codes can redeem\n\n"
                 f"{theme.editListIcon} **Self-Registration**\n"
                 f"└ Manage the global Self-Registration system\n"
                 f"{theme.lowerDivider}"
@@ -268,6 +272,15 @@ class MainMenu(commands.Cog):
                 )
                 return
             alliance_name, alliance_kid, state_locked, multistate = row
+
+            with sqlite3.connect('db/alliance.sqlite') as db:
+                cursor = db.cursor()
+                cursor.execute(
+                    "SELECT COALESCE(auto_remove_on_transfer, 0) FROM alliancesettings WHERE alliance_id = ?",
+                    (alliance_id,),
+                )
+                arow = cursor.fetchone()
+            auto_remove = bool(arow[0]) if arow else False
 
             with sqlite3.connect('db/users.sqlite') as db:
                 cursor = db.cursor()
@@ -319,19 +332,19 @@ class MainMenu(commands.Cog):
                     f"{theme.membersIcon} **Manage Members**\n"
                     f"└ View, add, transfer, export and remove members\n\n"
                     f"{theme.announceIcon} **Channel Setup**\n"
-                    f"└ Configure alliance channels: ID, Sync, Log\n\n"
-                    f"{theme.settingsIcon} **Settings**\n"
-                    f"└ Sync interval, auto-removal on transfer, notifications, logs\n\n"
+                    f"└ Set this alliance's ID, Activity Log and Redemption Log channels\n\n"
                     f"{theme.editListIcon} **Edit Name**\n"
                     f"└ Rename this alliance\n\n"
                     f"{theme.globeIcon} **Set Kingdom**\n"
-                    f"└ Set this alliance's home kingdom (used for redemption and to fill members)\n\n"
-                    f"{theme.lockIcon} **Kingdom Lock**\n"
-                    f"└ When on, reject members from other kingdoms when adding (needs a home kingdom)\n\n"
+                    f"└ Set the home kingdom new members inherit\n\n"
                     f"{theme.listIcon} **History**\n"
-                    f"└ Town Center level and nickname change history per member\n\n"
+                    f"└ Town Center level and nickname changes per member\n\n"
                     f"{theme.chartIcon} **Power Rankings**\n"
-                    f"└ Members ranked by power, with combat power and attendance\n\n"
+                    f"└ Members ranked by power and attendance\n\n"
+                    f"{theme.lockIcon} **Kingdom Lock**\n"
+                    f"└ Only allow members from the home kingdom\n\n"
+                    f"{theme.membersIcon} **Auto-remove Transfers**\n"
+                    f"└ Drop members who transfer to another kingdom\n\n"
                     f"{theme.trashIcon} **Delete Alliance**\n"
                     f"└ Permanently remove this alliance and all related data\n"
                     f"{theme.lowerDivider}"
@@ -342,6 +355,7 @@ class MainMenu(commands.Cog):
             view = AllianceHubView(
                 self, alliance_id, alliance_name, tier, alliances_with_counts,
                 state_locked=state_locked, alliance_kid=alliance_kid,
+                auto_remove=auto_remove,
             )
             await safe_edit_message(interaction, embed=embed, view=view, content=None)
 
@@ -649,7 +663,6 @@ class AllianceManagementEntryView(discord.ui.View):
             "alliance_entry_add": is_server_or_above,
             "alliance_entry_transfer": can_transfer,
             "alliance_entry_export": is_server_or_above,
-            "alliance_entry_sync_all": is_server_or_above,
             "alliance_entry_registration": is_global_or_above,
         }
         for child in self.children:
@@ -786,20 +799,6 @@ class AllianceManagementEntryView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="Sync All",
-        emoji=theme.refreshIcon,
-        style=discord.ButtonStyle.primary,
-        custom_id="alliance_entry_sync_all",
-        row=3,
-    )
-    async def sync_all(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _route_to_cog(
-            interaction, self.cog.bot, "Alliance",
-            "sync_all_alliances",
-            missing_label="Alliance",
-        )
-
-    @discord.ui.button(
         label="Main Menu",
         emoji=theme.homeIcon,
         style=discord.ButtonStyle.secondary,
@@ -814,14 +813,15 @@ class AllianceHubView(discord.ui.View):
     """Per-alliance hub. Layout:
       row 0: alliance switch dropdown
       row 1: Manage Members | Channel Setup
-      row 2: Settings | Edit Name | Set Kingdom | Kingdom Lock
+      row 2: Kingdom Lock | Auto-remove Transfers | Edit Name | Set Kingdom
       row 3: History | Power Rankings
       row 4: Back | Delete Alliance
     """
 
     def __init__(self, cog, alliance_id: int, alliance_name: str,
                  tier: str, alliances_with_counts: list,
-                 state_locked: bool = False, alliance_kid=None):
+                 state_locked: bool = False, alliance_kid=None,
+                 auto_remove: bool = False):
         super().__init__(timeout=7200)
         self.cog = cog
         self.alliance_id = alliance_id
@@ -830,8 +830,10 @@ class AllianceHubView(discord.ui.View):
         self.alliances = alliances_with_counts  # [(aid, name, count), ...]
         self.state_locked = bool(state_locked)
         self.alliance_kid = alliance_kid
+        self.auto_remove = bool(auto_remove)
         self._build_select()
         self._build_lock_toggle()
+        self._build_auto_remove_toggle()
 
     def _build_lock_toggle(self):
         # Kingdom Lock reads/writes state_locked; label + color reflect the current state.
@@ -839,7 +841,7 @@ class AllianceHubView(discord.ui.View):
             label=f"Kingdom Lock: {'On' if self.state_locked else 'Off'}",
             emoji=theme.lockIcon,
             style=discord.ButtonStyle.success if self.state_locked else discord.ButtonStyle.secondary,
-            row=2,
+            row=3,
         )
         btn.callback = self._on_lock_toggle
         self.add_item(btn)
@@ -864,6 +866,39 @@ class AllianceHubView(discord.ui.View):
             print(f"Error toggling kingdom lock on alliance {self.alliance_id}: {e}")
             await interaction.response.send_message(
                 f"{theme.deniedIcon} Failed to update the kingdom lock.", ephemeral=True
+            )
+            return
+        await self.cog.show_alliance_hub(interaction, self.alliance_id)
+
+    def _build_auto_remove_toggle(self):
+        # Auto-remove Transfers reads/writes auto_remove_on_transfer; label + color reflect the current state.
+        btn = discord.ui.Button(
+            label=f"Auto-remove Transfers: {'On' if self.auto_remove else 'Off'}",
+            emoji=theme.membersIcon,
+            style=discord.ButtonStyle.success if self.auto_remove else discord.ButtonStyle.secondary,
+            row=3,
+        )
+        btn.callback = self._on_auto_remove_toggle
+        self.add_item(btn)
+
+    async def _on_auto_remove_toggle(self, interaction: discord.Interaction):
+        new_val = 0 if self.auto_remove else 1
+        try:
+            with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO alliancesettings (alliance_id) VALUES (?)",
+                    (self.alliance_id,),
+                )
+                conn.execute(
+                    "UPDATE alliancesettings SET auto_remove_on_transfer = ? WHERE alliance_id = ?",
+                    (new_val, self.alliance_id),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error toggling auto-remove on alliance {self.alliance_id}: {e}")
+            print(f"Error toggling auto-remove on alliance {self.alliance_id}: {e}")
+            await interaction.response.send_message(
+                f"{theme.deniedIcon} Failed to update auto-remove.", ephemeral=True
             )
             return
         await self.cog.show_alliance_hub(interaction, self.alliance_id)
@@ -923,15 +958,6 @@ class AllianceHubView(discord.ui.View):
 
     # ── Secondary actions (row 2) ──
 
-    @discord.ui.button(label="Settings", emoji=theme.settingsIcon,
-                       style=discord.ButtonStyle.primary, row=2)
-    async def sync_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _route_to_cog(
-            interaction, self.cog.bot, "BotOperations",
-            "show_control_settings_for", self.alliance_id,
-            missing_label="Bot Operations",
-        )
-
     @discord.ui.button(label="Edit Name", emoji=theme.editListIcon,
                        style=discord.ButtonStyle.primary, row=2)
     async def edit_name(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -951,7 +977,7 @@ class AllianceHubView(discord.ui.View):
         )
 
     @discord.ui.button(label="History", emoji=theme.listIcon,
-                       style=discord.ButtonStyle.secondary, row=3)
+                       style=discord.ButtonStyle.secondary, row=2)
     async def history(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _route_to_cog(
             interaction, self.cog.bot, "AllianceHistory",
@@ -960,7 +986,7 @@ class AllianceHubView(discord.ui.View):
         )
 
     @discord.ui.button(label="Power Rankings", emoji=theme.chartIcon,
-                       style=discord.ButtonStyle.secondary, row=3)
+                       style=discord.ButtonStyle.secondary, row=2)
     async def power_rankings(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _route_to_cog(
             interaction, self.cog.bot, "AllianceMemberOperations",

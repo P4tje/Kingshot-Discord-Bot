@@ -1,5 +1,5 @@
-"""Per-alliance channel setup. Consolidates ID Channel, Activity Log, and Sync
-Log into a single view so admins configure all three in one place."""
+"""Per-alliance channel setup. Consolidates ID Channel, Activity Log, and
+Redemption Log into a single view so admins configure them in one place."""
 
 import discord
 from discord.ext import commands
@@ -37,12 +37,11 @@ class AllianceChannels(commands.Cog):
 
 
 class ChannelSetupView(discord.ui.View):
-    """Three-channel control surface. Each row: Set + Clear. Bottom: Back."""
+    """Per-alliance channel control surface. Each row: Set + Clear. Bottom: Back."""
 
     KINDS = {
         "id":     ("ID Channel",     "fidIcon",      "_set_id_channel",  "_clear_id_channel"),
         "log":    ("Activity Log",   "documentIcon", "_set_activity_log", "_clear_activity_log"),
-        "sync":   ("Sync Log",       "refreshIcon",  "_set_sync_log",     "_clear_sync_log"),
         "redeem": ("Redemption Log", "giftIcon",     "_set_redemption_channel", "_clear_redemption_channel"),
     }
 
@@ -74,16 +73,6 @@ class ChannelSetupView(discord.ui.View):
             )
             row = cur.fetchone()
         return row[0] if row else None
-
-    def _get_sync_log_channel(self):
-        with sqlite3.connect('db/alliance.sqlite') as db:
-            cur = db.cursor()
-            cur.execute(
-                "SELECT channel_id FROM alliancesettings WHERE alliance_id = ?",
-                (self.alliance_id,),
-            )
-            row = cur.fetchone()
-        return row[0] if row and row[0] else None
 
     # ── DB writers ─────────────────────────────────────────────────────
 
@@ -151,25 +140,6 @@ class ChannelSetupView(discord.ui.View):
             )
             db.commit()
 
-    def _set_sync_log(self, channel_id: int, **_):
-        with sqlite3.connect('db/alliance.sqlite') as db:
-            cur = db.cursor()
-            cur.execute(
-                "INSERT INTO alliancesettings (alliance_id, channel_id) VALUES (?, ?) "
-                "ON CONFLICT(alliance_id) DO UPDATE SET channel_id = excluded.channel_id",
-                (self.alliance_id, channel_id),
-            )
-            db.commit()
-
-    def _clear_sync_log(self, **_):
-        with sqlite3.connect('db/alliance.sqlite') as db:
-            cur = db.cursor()
-            cur.execute(
-                "UPDATE alliancesettings SET channel_id = NULL WHERE alliance_id = ?",
-                (self.alliance_id,),
-            )
-            db.commit()
-
     def _get_redemption_channel(self):
         with sqlite3.connect('db/alliance.sqlite') as db:
             cur = db.cursor()
@@ -208,7 +178,7 @@ class ChannelSetupView(discord.ui.View):
         return discord.Embed(
             title=f"{theme.allianceIcon} {self.alliance_name} — Channel Setup",
             description=(
-                f"Configure the three per-alliance channels in one place.\n\n"
+                f"Configure this alliance's channels in one place.\n\n"
                 f"**Channels**\n"
                 f"{theme.upperDivider}\n"
                 f"{theme.fidIcon} **ID Channel**\n"
@@ -217,9 +187,6 @@ class ChannelSetupView(discord.ui.View):
                 f"{theme.documentIcon} **Activity Log**\n"
                 f"└ {fmt(self._get_activity_log_channel())}\n"
                 f"└ Posts member additions, removals, and history events\n\n"
-                f"{theme.refreshIcon} **Sync Log**\n"
-                f"└ {fmt(self._get_sync_log_channel())}\n"
-                f"└ Posts sync status messages from the periodic API sync\n\n"
                 f"{theme.giftIcon} **Redemption Log**\n"
                 f"└ {fmt(self._get_redemption_channel())}\n"
                 f"└ Posts gift code redemption progress and summaries\n"
@@ -233,8 +200,7 @@ class ChannelSetupView(discord.ui.View):
         rows = [
             ("id",     theme.fidIcon,      0),
             ("log",    theme.documentIcon, 1),
-            ("sync",   theme.refreshIcon,  2),
-            ("redeem", theme.giftIcon,     3),
+            ("redeem", theme.giftIcon,     2),
         ]
         for kind, icon, row in rows:
             label = self.KINDS[kind][0]
@@ -290,8 +256,6 @@ class ChannelSetupView(discord.ui.View):
                 self._clear_id_channel(interaction.guild_id)
             elif kind == "log":
                 self._clear_activity_log()
-            elif kind == "sync":
-                self._clear_sync_log()
             else:  # redeem
                 self._clear_redemption_channel()
             self._build_components()
@@ -315,8 +279,6 @@ class ChannelSetupView(discord.ui.View):
             self._set_id_channel(interaction.guild_id, channel_id, interaction.user.id)
         elif kind == "log":
             self._set_activity_log(channel_id)
-        elif kind == "sync":
-            self._set_sync_log(channel_id)
         else:  # redeem
             self._set_redemption_channel(channel_id)
 

@@ -4,6 +4,7 @@ EventReviewView auto-detects mode from which row lists are populated; partial
 sessions stay open so a later upload of the missing half enriches the record.
 """
 from __future__ import annotations
+import asyncio
 import logging
 import re
 import sqlite3
@@ -14,7 +15,6 @@ import discord
 
 from .pimp_my_bot import theme
 from .bear_track import _isolate_rtl, _ltr_line
-from .login_handler import LoginHandler
 from . import alliance_power_changes
 from .attendance_ocr_parsers import (
     EVENT_TYPES,
@@ -1394,7 +1394,7 @@ class EventReviewView(discord.ui.View):
             prev_total = self._previous_event_total(session_id)
             if prev_total and prev_total > 0:
                 delta_pct = (total_all - prev_total) / prev_total * 100
-                arrow = "📈" if delta_pct >= 0 else "📉"
+                arrow = f"{theme.averageIcon}" if delta_pct >= 0 else "📉"
                 analytics_lines.append(
                     f"{arrow} `{delta_pct:+.1f}%` vs previous event "
                     f"(was `{_format_compact(prev_total)}`)"
@@ -1473,40 +1473,23 @@ class _ConfirmDeleteEventView(discord.ui.View):
 
 async def _resolve_player_field(interaction: discord.Interaction,
                                 view: "EventReviewView", text: str):
-    """Resolve an ID or name to (fid, nickname, status, note). An ID not in the
-    roster is looked up via the player API (like /w); `note` is an ephemeral
-    message for the caller to surface."""
+    """Resolve an ID or name to (fid, nickname, status, note). An ID not in the roster is
+    confirmed against the alliance's kingdom and added with a placeholder name (names can't be
+    looked up anymore); `note` is an ephemeral message for the caller to surface."""
     text = (text or "").strip()
     if text.isdigit():
         fid = int(text)
         nick = view._lookup_nickname(fid)
         if nick:
             return fid, nick, "manual", f"{theme.verifiedIcon} Matched ID `{fid}` to **{_isolate_rtl(nick)}**."
-        # Not in the roster — pull the name from the player API.
+        # Not in the roster - confirm against the alliance's kingdom and add as 'Player <fid>'.
         if not interaction.response.is_done():
             await interaction.response.defer()
-        try:
-            result = await LoginHandler().fetch_player_data(str(fid))
-        except Exception as e:
-            logger.error(f"Attendance player lookup failed for {fid}: {e}")
-            print(f"[ERROR] Attendance player lookup failed for {fid}: {e}")
-            return fid, None, "no_match", f"{theme.deniedIcon} Lookup failed for ID `{fid}` — try again shortly."
-        if result.get("status") == "success" and result.get("data"):
-            nick = result["data"].get("nickname") or str(fid)
-            state = _ensure_player_in_alliance(fid, result["data"], view.session.alliance_id)
+        added, nick, note = await _add_unknown_fid(interaction, view, fid)
+        if added:
             view.roster = load_alliance_roster(view.session.alliance_id)
-            disp = _isolate_rtl(nick)
-            if state == "added":
-                note = f"{theme.verifiedIcon} Added **{disp}** (ID `{fid}`) to the alliance and matched the row."
-            elif state == "other_alliance":
-                note = f"{theme.warnIcon} Matched ID `{fid}` to **{disp}** — already in another alliance, not moved."
-            else:
-                note = f"{theme.verifiedIcon} Matched ID `{fid}` to **{disp}**."
             return fid, nick, "manual", note
-        reason = {"rate_limited": "API rate limit reached — try again shortly.",
-                  "not_found": f"No player found with ID `{fid}`."}.get(
-            result.get("status") or "", "Lookup failed.")
-        return fid, None, "no_match", f"{theme.deniedIcon} {reason}"
+        return fid, None, "no_match", note
     if text:
         f, st = fuzzy_match_name(text, view.roster, alliance_id=view.session.alliance_id)
         if f is not None:
@@ -1517,22 +1500,36 @@ async def _resolve_player_field(interaction: discord.Interaction,
     return None, None, "no_match", None
 
 
-def _ensure_player_in_alliance(fid: int, data: dict, alliance_id) -> str:
-    """Add a looked-up player to this alliance if untracked. Returns 'added',
-    'exists', or 'other_alliance' — never moves a player from another alliance."""
-    nick = data.get("nickname") or str(fid)
+async def _add_unknown_fid(interaction, view, fid):
+    """Confirm an unknown fid against the alliance's kingdom (one probe) and add it with a
+    placeholder name. Returns (added, nickname, note). Never moves a player from another alliance."""
+    from . import gift_state_resolver
+    alliance_id = view.session.alliance_id
     with sqlite3.connect("db/users.sqlite", timeout=30.0) as conn:
         row = conn.execute("SELECT alliance FROM users WHERE fid = ?", (fid,)).fetchone()
-        if row is not None:
-            return "exists" if str(row[0]) == str(alliance_id) else "other_alliance"
+    if row is not None:
+        if str(row[0]) == str(alliance_id):
+            return False, None, f"{theme.warnIcon} ID `{fid}` is already in this alliance."
+        return False, None, f"{theme.warnIcon} ID `{fid}` is in another alliance - not moved."
+    gift_cog = interaction.client.get_cog("GiftOperations")
+    if gift_cog is None:
+        return False, None, f"{theme.deniedIcon} Gift Codes is unavailable, so I can't verify ID `{fid}`."
+    alliance_kid = await asyncio.to_thread(gift_state_resolver.get_alliance_kid, alliance_id)
+    if alliance_kid is None:
+        return False, None, (f"{theme.warnIcon} This alliance has no kingdom set, so I can't confirm ID `{fid}`. "
+                             f"Add them under Alliance Management first.")
+    kid, verified = await gift_state_resolver.verify_add_state(gift_cog, fid, alliance_id)
+    if not verified:
+        return False, None, (f"{theme.deniedIcon} Couldn't confirm ID `{fid}` in kingdom `{alliance_kid}` - "
+                             f"they may be in another kingdom, or the ID is wrong. Add them under Alliance Management first.")
+    nick = f"Player {fid}"
+    with sqlite3.connect("db/users.sqlite", timeout=30.0) as conn:
         conn.execute(
             "INSERT INTO users (fid, nickname, furnace_lv, kid, stove_lv_content, alliance) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (fid, nick, data.get("stove_lv", 0), str(data.get("kid", "")),
-             data.get("stove_lv_content", ""), str(alliance_id)),
-        )
+            "VALUES (?, ?, 0, ?, '', ?)",
+            (fid, nick, str(kid), str(alliance_id)))
         conn.commit()
-        return "added"
+    return True, nick, f"{theme.verifiedIcon} Added **{nick}** (ID `{fid}`) to the alliance and matched the row."
 
 
 class _EditMergedRowModal(discord.ui.Modal):

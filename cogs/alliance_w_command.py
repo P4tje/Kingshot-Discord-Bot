@@ -6,7 +6,6 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from .pimp_my_bot import theme
-from .login_handler import LoginHandler
 
 logger = logging.getLogger('alliance')
 

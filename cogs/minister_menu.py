@@ -7,7 +7,7 @@ import sqlite3
 import logging
 from .permission_handler import PermissionManager
 from .pimp_my_bot import theme, safe_edit_message
-from .login_handler import LoginHandler
+from .alliance_member_edit import apply_member_edit
 
 logger = logging.getLogger('bot')
 
@@ -33,6 +33,70 @@ class UserFilterModal(discord.ui.Modal, title="Filter Users"):
         self.parent_view.update_select_menu()
         self.parent_view.update_navigation_buttons()
         await self.parent_view.update_embed(interaction)
+
+class UpdateNamesModal(discord.ui.Modal):
+    """Manually set booked ministers' names, one `id, name` per line."""
+
+    def __init__(self, cog, activity_name, prefill=""):
+        super().__init__(title="Update Names")
+        self.cog = cog
+        self.activity_name = activity_name
+        self.lines_input = discord.ui.TextInput(
+            label="Per line: id, name",
+            style=discord.TextStyle.paragraph,
+            placeholder="12345678, PlayerName\n23456789, Another Name",
+            default=prefill,
+            required=True,
+            max_length=4000,
+        )
+        self.add_item(self.lines_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        updated = 0
+        skipped = 0
+        for line in self.lines_input.value.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(",", 1)
+            if len(parts) != 2:
+                skipped += 1
+                continue
+            fid_str, name = parts[0].strip(), parts[1].strip()
+            if not fid_str.isdigit() or not name:
+                skipped += 1
+                continue
+            if apply_member_edit(int(fid_str), nickname=name):
+                updated += 1
+
+        result_msg = f"Updated {updated} name(s) for {self.activity_name}"
+        if skipped:
+            result_msg += f" ({skipped} line(s) skipped)"
+
+        _, is_global, _ = await self.cog.get_admin_permissions(interaction.user.id)
+        embed = discord.Embed(
+            title=f"{theme.settingsIcon} Minister Settings",
+            description=(
+                f"{theme.verifiedIcon} **{result_msg}**\n\n"
+                f"Administrative settings for minister scheduling:\n\n"
+                f"Available Actions\n"
+                f"{theme.upperDivider}\n\n"
+                f"{theme.editListIcon} **Update Names**\n"
+                f"└ Manually set booked ministers' names\n\n"
+                f"{theme.listIcon} **Schedule List Type**\n"
+                f"└ Change the type of schedule list message when adding/removing people\n\n"
+                f"{theme.calendarIcon} **Delete All Reservations**\n"
+                f"└ Clear appointments for a specific day\n\n"
+                f"{theme.announceIcon} **Clear Channels**\n"
+                f"└ Clear channel configurations\n\n"
+                f"{theme.fidIcon} **Delete Server ID**\n"
+                f"└ Remove configured server from database\n\n"
+                f"{theme.lowerDivider}"
+            ),
+            color=theme.emColor3
+        )
+        view = MinisterSettingsView(self.cog.bot, self.cog, is_global)
+        await interaction.response.edit_message(embed=embed, view=view, content=None)
 
 class FilteredUserSelectView(discord.ui.View):
     def __init__(self, bot, cog, activity_name, users, booked_times, page=0):
@@ -112,7 +176,7 @@ class FilteredUserSelectView(discord.ui.View):
             options = []
             for fid, nickname, alliance_id in current_users:
                 # Check if user is already booked
-                emoji = "📅" if fid in self.booked_fids else ""
+                emoji = f"{theme.calendarIcon}" if fid in self.booked_fids else ""
                 # Avoid nested f-strings for Python 3.9+ compatibility
                 if emoji:
                     label = f"{emoji} {nickname} ({fid})"
@@ -208,10 +272,10 @@ class FilteredUserSelectView(discord.ui.View):
         description += (
             f"**Current Status**\n"
             f"{theme.upperDivider}\n"
-            f"📅 **Booked Slots:** `{total_booked}/48`\n"
+            f"{theme.calendarIcon} **Booked Slots:** `{total_booked}/48`\n"
             f"{theme.timeIcon} **Available Slots:** `{available_slots}/48`\n"
             f"{theme.lowerDivider}\n\n"
-            f"📅 = User already has a booking"
+            f"{theme.calendarIcon} = User already has a booking"
         )
         
         embed = discord.Embed(
@@ -298,7 +362,7 @@ class ClearConfirmationView(discord.ui.View):
                 f"Available Actions\n"
                 f"{theme.upperDivider}\n\n"
                 f"{theme.editListIcon} **Update Names**\n"
-                f"└ Update nicknames from API for booked users\n\n"
+                f"└ Manually set booked ministers' names\n\n"
                 f"{theme.listIcon} **Schedule List Type**\n"
                 f"└ Change the type of schedule list message when adding/removing people\n\n"
                 f"{theme.calendarIcon} **Delete All Reservations**\n"
@@ -771,17 +835,6 @@ class MinisterMenu(commands.Cog):
         except Exception:
             pass
 
-    async def fetch_user_data(self, fid, proxy=None):
-        result = await LoginHandler().fetch_player_data(str(fid), use_proxy=proxy)
-        if result['status'] == 'success':
-            return {"data": result['data']}
-        elif result['status'] == 'rate_limited':
-            return 429
-        elif result['status'] == 'not_found':
-            return {"data": None}
-        else:
-            return None
-
     async def is_admin(self, user_id: int) -> bool:
         settings_conn = sqlite3.connect('db/settings.sqlite')
         settings_cursor = settings_conn.cursor()
@@ -1029,10 +1082,10 @@ class MinisterMenu(commands.Cog):
         description += (
             f"**Current Status**\n"
             f"{theme.upperDivider}\n"
-            f"📅 **Booked Slots:** `{total_booked}/48`\n"
+            f"{theme.calendarIcon} **Booked Slots:** `{total_booked}/48`\n"
             f"{theme.timeIcon} **Available Slots:** `{available_slots}/48`\n"
             f"{theme.lowerDivider}\n\n"
-            f"📅 = User already has a booking"
+            f"{theme.calendarIcon} = User already has a booking"
         )
         
         embed = discord.Embed(
@@ -1047,70 +1100,23 @@ class MinisterMenu(commands.Cog):
             await interaction.followup.send(embed=embed, view=view)
     
     async def update_minister_names(self, interaction: discord.Interaction, activity_name: str):
-        """Update nicknames from API for all booked users"""
-        await interaction.response.defer()
-        
-        # Get all bookings for this activity
-        self.svs_cursor.execute("SELECT DISTINCT fid FROM appointments WHERE appointment_type=?", (activity_name,))
+        """Open a modal to manually set booked ministers' names for this activity."""
+        self.svs_cursor.execute("SELECT fid FROM appointments WHERE appointment_type=? ORDER BY time", (activity_name,))
         fids = [row[0] for row in self.svs_cursor.fetchall()]
-        
-        if not fids:
-            await interaction.followup.send(f"{theme.deniedIcon} No appointments to update.", ephemeral=True)
-            return
-        
-        updated_count = 0
-        failed_count = 0
-        
-        for fid in fids:
-            try:
-                # Fetch user data from API
-                data = await self.fetch_user_data(fid)
-                if data and isinstance(data, dict) and "data" in data:
-                    new_nickname = data["data"].get("nickname", "")
-                    if new_nickname:
-                        # Update in database
-                        self.users_cursor.execute("UPDATE users SET nickname=? WHERE fid=?", (new_nickname, fid))
-                        self.users_conn.commit()
-                        updated_count += 1
-                    else:
-                        failed_count += 1
-                else:
-                    failed_count += 1
-            except Exception as e:
-                print(f"Error updating nickname for ID {fid}: {e}")
-                failed_count += 1
-        
-        # Show result
-        result_msg = f"Updated {updated_count} nicknames for {activity_name}"
-        if failed_count > 0:
-            result_msg += f" ({failed_count} failed)"
-        
-        # Return to settings menu with success message
-        _, is_global, _ = await self.get_admin_permissions(interaction.user.id)
-        embed = discord.Embed(
-            title=f"{theme.settingsIcon} Minister Settings",
-            description=(
-                f"{theme.verifiedIcon} **{result_msg}**\n\n"
-                f"Administrative settings for minister scheduling:\n\n"
-                f"Available Actions\n"
-                f"{theme.upperDivider}\n\n"
-                f"{theme.editListIcon} **Update Names**\n"
-                f"└ Update nicknames from API for booked users\n\n"
-                f"{theme.listIcon} **Schedule List Type**\n"
-                f"└ Change the type of schedule list message when adding/removing people\n\n"
-                f"{theme.calendarIcon} **Delete All Reservations**\n"
-                f"└ Clear appointments for a specific day\n\n"
-                f"{theme.announceIcon} **Clear Channels**\n"
-                f"└ Clear channel configurations\n\n"
-                f"{theme.fidIcon} **Delete Server ID**\n"
-                f"└ Remove configured server from database\n\n"
-                f"{theme.lowerDivider}"
-            ),
-            color=theme.emColor3
-        )
 
-        view = MinisterSettingsView(self.bot, self, is_global)
-        await interaction.followup.send(embed=embed, view=view)
+        if not fids:
+            await interaction.response.send_message(f"{theme.deniedIcon} No booked ministers to update for {activity_name}.", ephemeral=True)
+            return
+
+        prefill_lines = []
+        for fid in fids:
+            self.users_cursor.execute("SELECT nickname FROM users WHERE fid=?", (fid,))
+            row = self.users_cursor.fetchone()
+            nickname = row[0] if row else ""
+            prefill_lines.append(f"{fid}, {nickname}")
+
+        modal = UpdateNamesModal(self, activity_name, "\n".join(prefill_lines))
+        await interaction.response.send_modal(modal)
     
     async def show_clear_confirmation(self, interaction: discord.Interaction, activity_name: str):
         """Show confirmation for clearing appointments"""
@@ -1249,16 +1255,7 @@ class MinisterMenu(commands.Cog):
             self.svs_conn.commit()
 
             # Get avatar
-            try:
-                data = await self.fetch_user_data(fid)
-                if isinstance(data, int) and data == 429:
-                    avatar_image = "https://gof-formal-avatar.akamaized.net/avatar-dev/2023/07/17/1001.png"
-                elif data and "data" in data and "avatar_image" in data["data"]:
-                    avatar_image = data["data"]["avatar_image"]
-                else:
-                    avatar_image = "https://gof-formal-avatar.akamaized.net/avatar-dev/2023/07/17/1001.png"
-            except Exception:
-                avatar_image = "https://gof-formal-avatar.akamaized.net/avatar-dev/2023/07/17/1001.png"
+            avatar_image = "https://gof-formal-avatar.akamaized.net/avatar-dev/2023/07/17/1001.png"
 
             # Send log embed and log change
             minister_schedule_cog = self.bot.get_cog("MinisterSchedule")
@@ -1386,16 +1383,7 @@ class MinisterMenu(commands.Cog):
             self.svs_conn.commit()
             
             # Get avatar for log
-            try:
-                data = await self.fetch_user_data(fid)
-                if isinstance(data, int) and data == 429:
-                    avatar_image = "https://gof-formal-avatar.akamaized.net/avatar-dev/2023/07/17/1001.png"
-                elif data and "data" in data and "avatar_image" in data["data"]:
-                    avatar_image = data["data"]["avatar_image"]
-                else:
-                    avatar_image = "https://gof-formal-avatar.akamaized.net/avatar-dev/2023/07/17/1001.png"
-            except Exception:
-                avatar_image = "https://gof-formal-avatar.akamaized.net/avatar-dev/2023/07/17/1001.png"
+            avatar_image = "https://gof-formal-avatar.akamaized.net/avatar-dev/2023/07/17/1001.png"
             
             # Send log embed and log change
             minister_schedule_cog = self.bot.get_cog("MinisterSchedule")
@@ -1495,10 +1483,10 @@ class MinisterMenu(commands.Cog):
                             f"Available Actions\n"
                             f"{theme.upperDivider}\n\n"
                             f"{theme.editListIcon} **Update Names**\n"
-                            f"└ Update nicknames from API for booked users\n\n"
+                            f"└ Manually set booked ministers' names\n\n"
                             f"{theme.listIcon} **Schedule List Type**\n"
                             f"└ Change the type of schedule list message when adding/removing people\n\n"
-                            f"📅 **Delete All Reservations**\n"
+                            f"{theme.calendarIcon} **Delete All Reservations**\n"
                             f"└ Clear appointments for a specific day\n\n"
                             f"{theme.announceIcon} **Clear Channels**\n"
                             f"└ Clear channel configurations\n\n"
@@ -1571,7 +1559,7 @@ class MinisterMenu(commands.Cog):
                 f"Available Actions\n"
                 f"{theme.upperDivider}\n\n"
                 f"{theme.editListIcon} **Update Names**\n"
-                f"└ Update nicknames from API for booked users\n\n"
+                f"└ Manually set booked ministers' names\n\n"
                 f"{theme.listIcon} **Schedule List Type**\n"
                 f"└ Change the type of schedule list message when adding/removing people\n\n"
                 f"{theme.timeIcon} **Time Slot Mode**\n"
@@ -1619,7 +1607,7 @@ class MinisterMenu(commands.Cog):
             return
 
         embed = discord.Embed(
-            title="📅 Delete All Reservations",
+            title=f"{theme.calendarIcon} Delete All Reservations",
             description="Select which activity day you want to clear reservations for:",
             color=theme.emColor2
         )
@@ -1818,7 +1806,7 @@ class MinisterMenu(commands.Cog):
         current_label = labels[current_value]
 
         embed = discord.Embed(
-            title="📋 Schedule List Type",
+            title=f"{theme.copyIcon} Schedule List Type",
             description=f"Select the type of generated minister list message when adding/removing people:\n\n**Currently showing:** {current_label}",
             color=theme.emColor3
         )
@@ -1843,7 +1831,7 @@ class MinisterMenu(commands.Cog):
             self.svs_conn.commit()
 
             updated_embed = discord.Embed(
-                title="📋 Schedule List Type",
+                title=f"{theme.copyIcon} Schedule List Type",
                 description=f"{theme.verifiedIcon} Schedule list type updated successfully!\n\n**Now showing:** {labels[value]}\n\nNew changes will take effect when you add/remove a person to/from the minister schedule.",
                 color=theme.emColor3
             )

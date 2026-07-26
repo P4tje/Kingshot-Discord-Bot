@@ -83,9 +83,9 @@ ACTIVE_LOG_NAMES = [
     'alliance.txt', 'bot.txt', 'gift.txt', 'notification.txt', 'redemption.txt',
     'rapidocr.txt',
     # Per-feature logs written directly by cogs
-    'alliance_control.txt', 'alliance_memberlog.txt', 'alliance_sync.txt',
+    'alliance_control.txt', 'alliance_memberlog.txt',
     'backuplog.txt', 'bear_trap.txt', 'db_maintenance.txt', 'gift_ops.txt',
-    'gift_solver.txt', 'giftlog.txt', 'id_channel_log.txt', 'login_handler.txt',
+    'gift_solver.txt', 'giftlog.txt', 'id_channel_log.txt',
     'notifications.txt', 'verification.txt', 'add_memberlog.txt',
 ]
 
@@ -93,7 +93,6 @@ ACTIVE_LOG_NAMES = [
 # These are imported by other cogs and should not be flagged as unused
 HELPER_FILES = [
     'permission_handler',      # Permission checking utilities
-    'login_handler',           # API login handling
     'gift_operationsapi',      # Gift code API class
     'notification_event_types',        # Notification constants/types
     'pimp_my_bot_editor',      # Theme editor utilities

@@ -340,7 +340,7 @@ class BackupOperations(commands.Cog):
                     f"1. Extract this ZIP file{extract_pw}\n"
                     "2. Replace your db/ folder contents with these files\n"
                     "3. Restart the bot\n\n"
-                    "🤖 Kingshot Discord Bot Backup System\n"
+                    f"{theme.robotIcon} Kingshot Discord Bot Backup System\n"
                 )
                 await asyncio.to_thread(self._write_db_zip, filepath, backup_password, readme_content)
                 return filename
@@ -366,7 +366,7 @@ class BackupOperations(commands.Cog):
                         "2. Replace your db/ folder contents with these files\n"
                         "3. Restart the bot\n\n"
                         "⚠️ This backup expires in 30 days from Discord\n\n"
-                        "🤖 Kingshot Discord Bot Backup System\n"
+                        f"{theme.robotIcon} Kingshot Discord Bot Backup System\n"
                     )
                     await asyncio.to_thread(self._write_db_zip, temp_filepath, backup_password, readme_content)
 

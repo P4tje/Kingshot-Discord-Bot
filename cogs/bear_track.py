@@ -6,7 +6,6 @@ from discord.ext import commands
 from discord import app_commands
 import asyncio
 import aiohttp
-from contextlib import asynccontextmanager
 import gc
 import io
 import re
@@ -20,8 +19,6 @@ from datetime import datetime, date, timedelta, timezone
 from cogs.attendance import MATPLOTLIB_AVAILABLE
 from .pimp_my_bot import theme, safe_edit_message, check_interaction_user
 from .permission_handler import PermissionManager
-from .login_handler import LoginHandler
-from .bot_level_mapping import format_furnace_level
 import numpy as np
 
 logger = logging.getLogger('bot')
@@ -1869,6 +1866,8 @@ class BearSession:
         self.events: list[EventGroup] = []
         self.source_messages: list[discord.Message] = []
         self.lock = asyncio.Lock()
+        # Set without the lock so Cancel lands mid-batch.
+        self.cancel_requested = False
         self.timer_task: asyncio.Task | None = None
         self.progress_msg: discord.Message | None = None
         self.session_view: discord.ui.View | None = None
@@ -2078,25 +2077,10 @@ class BearSession:
                 f"for more screenshots…"
             )
 
-        # Warn when gift-code redemption is running, since it shares the CPU/OCR
-        # and can slow bear OCR to a crawl on smaller hosts.
-        redeem_warning = ""
-        try:
-            pq = self.cog.bot.get_cog('ProcessQueue')
-            if pq and (pq.has_queued_or_active('gift_redeem')
-                       or pq.has_queued_or_active('gift_validate')):
-                redeem_warning = (
-                    f"\n\n{theme.warnIcon} Gift code redemption is running right now, "
-                    f"so bear OCR may be delayed until it finishes."
-                )
-        except Exception:
-            redeem_warning = ""
-
         description = (
             f"{theme.upperDivider}\n"
             f"{summary}"
             f"{status_line}"
-            f"{redeem_warning}"
             f"{footer_line}\n"
             f"{theme.lowerDivider}"
         )
@@ -2148,6 +2132,9 @@ class BearSession:
                 await self.render_progress()
 
             for attachment in image_attachments:
+                if self.cancel_requested:
+                    logger.info("Bear OCR: batch stopped early, session cancelled by the user")
+                    return
                 self.current_image_idx = self.processed_images + 1
                 self.current_image_total = self.known_total_images
                 self.current_phase = 'ocr'
@@ -2201,6 +2188,7 @@ class BearSession:
             await self._release_all_engines()
 
     async def cancel(self):
+        self.cancel_requested = True
         async with self.lock:
             if self.finalized:
                 return
@@ -3227,15 +3215,6 @@ class BearTrack(commands.Cog):
         auto_delete = bool(row[1]) if row[1] is not None else True
         return int(timeout), auto_delete
 
-    @asynccontextmanager
-    async def _acquire_ocr_slot(self):
-        """Yield to gift redemption first, then acquire an OCR slot."""
-        pq = self.bot.get_cog('ProcessQueue')
-        while pq and pq.has_queued_or_active('gift_redeem'):
-            await asyncio.sleep(2)
-        async with _get_ocr_semaphore():
-            yield
-
     async def _ocr_attachment_to_result(self, image_bytes: bytes, primary_lang: str,
                                         fallback_langs: list, *, filename: str = "",
                                         roster: list | None = None,
@@ -3250,7 +3229,7 @@ class BearTrack(commands.Cog):
         if progress_callback:
             await progress_callback('ocr', primary_lang)
         try:
-            async with self._acquire_ocr_slot():
+            async with _get_ocr_semaphore():
                 primary_boxed = await ocr_bytes_with_boxes(image_bytes, primary_lang, session=session)
             extracted_text = ' '.join(t for t, _b in primary_boxed)
         except Exception as e:
@@ -3297,7 +3276,7 @@ class BearTrack(commands.Cog):
                 if progress_callback:
                     await progress_callback('fallback', fb_lang)
                 try:
-                    async with self._acquire_ocr_slot():
+                    async with _get_ocr_semaphore():
                         fb_boxed = await ocr_bytes_with_boxes(image_bytes, fb_lang, session=session)
                     fb_text = ' '.join(t for t, _b in fb_boxed)
                 except Exception as e:
@@ -3746,7 +3725,7 @@ _STATUS_ICONS = {
     'auto': '✅',
     'likely': '🟡',
     'ambiguous': '⚠',
-    'none': '❌',
+    'none': f'{theme.deniedIcon}',
     'manual': '✏',
 }
 
@@ -4720,7 +4699,7 @@ class EditRowModal(discord.ui.Modal):
         if err:
             await interaction.response.send_message(f"{theme.deniedIcon} {err}", ephemeral=True)
             return
-        # Shared resolver: roster match, or game-API lookup + add-to-alliance for an unknown ID.
+        # Shared resolver: roster match, or kingdom-confirm + add-to-alliance for an unknown ID.
         edit_row = self.review_view.rows[self.row_idx]
         await _resolve_and_apply(
             interaction, self.review_view, row_id=self.row_idx,
@@ -4760,7 +4739,7 @@ class AddRowModal(discord.ui.Modal):
         if err:
             await interaction.response.send_message(f"{theme.deniedIcon} {err}", ephemeral=True)
             return
-        # Shared resolver: roster match, or game-API lookup + add-to-alliance for an unknown ID.
+        # Shared resolver: roster match, or kingdom-confirm + add-to-alliance for an unknown ID.
         await _resolve_and_apply(
             interaction, self.review_view, row_id=None,
             text=text, damage=damage, rank=rank, raw_name=text,
@@ -5860,7 +5839,7 @@ def _build_player_breakdown_embed(*, alliance_name, hunting_trap, players, has_b
         desc = desc[:3990] + "\n…(truncated)"
     embed.description = desc or "*No matched players in this hunt.*"
     if has_baseline:
-        embed.set_footer(text=f"Change vs the previous Trap {hunting_trap} bear · 🆕 = new/returning this trap")
+        embed.set_footer(text=f"Change vs the previous Trap {hunting_trap} bear · {theme.newIcon} = new/returning this trap")
     else:
         embed.set_footer(text=f"No earlier Trap {hunting_trap} bear to compare against yet.")
     return embed
@@ -5895,7 +5874,7 @@ def _aggregate_leaderboard(cur, *, alliance_id, hunting_trap, from_date, to_date
 
 # ---------------------------------------------------------------------------
 # Shared player-entry resolution: match to roster, swap an existing match,
-# or look up an unknown ID via the player API and offer to add them.
+# or confirm an unknown ID against the alliance's kingdom and offer to add them.
 # ---------------------------------------------------------------------------
 
 def _write_match_to_row(view, *, row_id, fid, nick, damage, rank, raw_name=None):
@@ -5963,9 +5942,9 @@ async def _resolve_and_apply(interaction, view, *, row_id, text, damage, rank, r
                              current_fid=None, current_name=None):
     """Resolve `text` (a roster name or an ID) and apply it to the target row.
     Known members match immediately (moving the match off any other row). An
-    unknown ID is looked up via the player API and offered for confirmation +
-    add-to-alliance. `view` must expose cog, alliance_id, hunt_id, roster,
-    original_user_id, and an async refresh()."""
+    unknown ID is confirmed against the alliance's kingdom and offered for
+    confirmation + add-to-alliance. `view` must expose cog, alliance_id, hunt_id,
+    roster, original_user_id, and an async refresh()."""
     raw = (text or "").strip()
     # Unchanged edit of a matched row: keep the player, just update damage/rank.
     if row_id is not None and current_fid is not None and raw == (current_name or "").strip():
@@ -6013,8 +5992,8 @@ async def _resolve_and_apply(interaction, view, *, row_id, text, damage, rank, r
                 f"Move them here first via Manage Members → Transfer.",
                 ephemeral=True)
             return
-        await _offer_api_add(interaction, view, row_id=row_id, fid=fid,
-                             damage=damage, rank=rank, raw_name=raw_name)
+        await _offer_add_by_id(interaction, view, row_id=row_id, fid=fid,
+                               damage=damage, rank=rank, raw_name=raw_name)
         return
 
     # Name entered — fuzzy-match the roster only (can't API-lookup by name).
@@ -6036,42 +6015,53 @@ async def _resolve_and_apply(interaction, view, *, row_id, text, damage, rank, r
             f"{theme.deniedIcon} Failed to update row.", ephemeral=True)
 
 
-async def _offer_api_add(interaction, view, *, row_id, fid, damage, rank, raw_name):
-    """Look up an unknown fid via the player API and show a confirm card."""
+async def _offer_add_by_id(interaction, view, *, row_id, fid, damage, rank, raw_name):
+    """Confirm an unknown fid against the alliance's kingdom (one probe), then show a confirm card.
+    Event participants are in the alliance's kingdom, so a single probe confirms the ID; names
+    can no longer be looked up, so the member is added as 'Player <fid>'."""
     await interaction.response.defer()
-    try:
-        result = await LoginHandler().fetch_player_data(str(fid))
-    except Exception as e:
-        logger.error(f"Player lookup failed for {fid}: {e}")
-        print(f"[ERROR] Player lookup failed for {fid}: {e}")
+    from . import gift_state_resolver
+    gift_cog = view.cog.bot.get_cog("GiftOperations")
+    if gift_cog is None:
         await interaction.followup.send(
-            f"{theme.deniedIcon} Lookup failed for ID `{fid}`. Try again later.", ephemeral=True)
+            f"{theme.deniedIcon} Gift Codes is unavailable, so I can't verify ID `{fid}` right now.",
+            ephemeral=True)
         return
-    if result.get('status') != 'success' or not result.get('data'):
-        reason = {'rate_limited': "API rate limit reached — try again shortly.",
-                  'not_found': f"No player found with ID `{fid}`."}.get(
-            result.get('status') or '', result.get('error_message') or "Lookup failed.")
-        await interaction.followup.send(f"{theme.deniedIcon} {reason}", ephemeral=True)
+    alliance_kid = await asyncio.to_thread(gift_state_resolver.get_alliance_kid, view.alliance_id)
+    if alliance_kid is None:
+        await interaction.followup.send(
+            f"{theme.warnIcon} This alliance has no kingdom set, so I can't confirm ID `{fid}`. "
+            f"Set its kingdom (Alliance Management → Set Kingdom), or add the member under Manage Members first.",
+            ephemeral=True)
         return
-    data = result['data']
+    kid, verified = await gift_state_resolver.verify_add_state(gift_cog, fid, view.alliance_id)
+    if not verified:
+        await interaction.followup.send(
+            f"{theme.deniedIcon} Couldn't confirm ID `{fid}` in kingdom `{alliance_kid}`. "
+            f"They may be in a different kingdom, or the ID is wrong - add them under Alliance Management → "
+            f"Manage Members first, then match the row.",
+            ephemeral=True)
+        return
     parent_message = await interaction.original_response()  # the review/editor message to refresh on confirm
     confirm = PlayerAddConfirmView(
-        view=view, parent_message=parent_message, row_id=row_id, fid=fid, player_data=data,
+        view=view, parent_message=parent_message, row_id=row_id, fid=fid, kid=kid,
         damage=damage, rank=rank, raw_name=raw_name)
     await interaction.followup.send(embed=confirm.build_embed(), view=confirm, ephemeral=True)
 
 
 class PlayerAddConfirmView(discord.ui.View):
-    """Confirm adding a looked-up player to the alliance and matching the row."""
+    """Confirm adding a typed-in fid to the alliance and matching the row. The fid was
+    confirmed in the alliance's kingdom by a single probe; names can't be looked up, so the
+    member is added as 'Player <fid>'."""
 
-    def __init__(self, *, view, parent_message, row_id, fid, player_data, damage, rank, raw_name):
+    def __init__(self, *, view, parent_message, row_id, fid, kid, damage, rank, raw_name):
         super().__init__(timeout=120)
         self.parent = view
         self.parent_message = parent_message
         self.original_user_id = view.original_user_id
         self.row_id = row_id
         self.fid = fid
-        self.pdata = player_data
+        self.kid = kid
         self.damage = damage
         self.rank = rank
         self.raw_name = raw_name or ""
@@ -6085,38 +6075,19 @@ class PlayerAddConfirmView(discord.ui.View):
         self.add_item(cancel_btn)
 
     def _nickname(self):
-        return self.pdata.get('nickname') or str(self.fid)
+        return f"Player {self.fid}"
 
     def build_embed(self) -> discord.Embed:
-        nick = self._nickname()
-        level = format_furnace_level(self.pdata.get('stove_lv', '?'))
-        kid = self.pdata.get('kid', '?')
-        embed = discord.Embed(
+        return discord.Embed(
             title=f"{theme.userIcon} Add Player to Alliance?",
             description=(
                 f"{theme.upperDivider}\n"
-                f"**{theme.userIcon} Name:** {_isolate_rtl(nick)}\n"
                 f"**{theme.fidIcon} ID:** `{self.fid}`\n"
-                f"**{theme.levelIcon} Town Center:** `{level}`\n"
-                f"**{theme.globeIcon} Kingdom:** `{kid}`\n"
+                f"**{theme.globeIcon} Kingdom:** `{self.kid}` (confirmed)\n"
+                f"**{theme.userIcon} Name:** `Player {self.fid}` - names can't be looked up, rename later if needed\n"
                 f"{theme.lowerDivider}\n"
                 f"This will add them to **this alliance** and match the bear row."),
             color=theme.emColor1)
-        # Soft warning when the looked-up name doesn't resemble the OCR'd name.
-        # Skip it when raw_name is a typed ID (Add-by-ID) rather than an OCR name.
-        if (self.raw_name and not self.raw_name.isdigit()
-                and name_match_score(self.raw_name, [(self.fid, nick)]) < 60):
-            embed.add_field(
-                name=f"{theme.warnIcon} Name mismatch",
-                value=f"OCR read `{self.raw_name}` but this ID is `{nick}`. "
-                      f"Confirm only if you're sure it's the right player.",
-                inline=False)
-        # Show the player's profile picture (not the FC-level image) so the
-        # admin can visually confirm it's the right person.
-        avatar = self.pdata.get('avatar_image')
-        if isinstance(avatar, str) and avatar.startswith("http"):
-            embed.set_thumbnail(url=avatar)
-        return embed
 
     async def _on_confirm(self, interaction: discord.Interaction):
         if not await check_interaction_user(interaction, self.original_user_id):
@@ -6127,8 +6098,7 @@ class PlayerAddConfirmView(discord.ui.View):
             cog.users_conn.execute(
                 "INSERT OR REPLACE INTO users (fid, nickname, furnace_lv, kid, stove_lv_content, alliance) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (self.fid, nick, self.pdata.get('stove_lv', 0), str(self.pdata.get('kid', '')),
-                 self.pdata.get('stove_lv_content', ''), str(self.parent.alliance_id)))
+                (self.fid, nick, 0, str(self.kid), '', str(self.parent.alliance_id)))
             cog.users_conn.commit()
         except Exception as e:
             logger.error(f"Failed to add user {self.fid}: {e}")

@@ -9,7 +9,6 @@ import asyncio
 import logging
 from .permission_handler import PermissionManager
 from .pimp_my_bot import theme, safe_edit_message, notify_view_expired
-from .process_queue import ALLIANCE_CONTROL
 
 logger = logging.getLogger('alliance')
 
@@ -45,26 +44,18 @@ def resolve_alliance_kid(alliance_id: int):
 
 
 def kingdom_lock_reason(alliance_kid, player_kid) -> "str | None":
-    """Denial reason for this player kid against a resolved alliance kid, else None."""
+    """Denial reason for this player kid against a resolved alliance kid, else None.
+
+    The kid may be self-reported and unverified, so the wording never claims to know
+    where the player actually is - it only states what the alliance accepts."""
     if alliance_kid is None:
         return None
-    if player_kid is None:
-        return (
-            f"Player has no kingdom number from the API; "
-            f"this alliance is locked to Kingdom #{alliance_kid}."
-        )
     try:
-        if int(player_kid) == int(alliance_kid):
+        if player_kid is not None and int(player_kid) == int(alliance_kid):
             return None
     except (TypeError, ValueError):
-        return (
-            f"Could not read the player's kingdom number; "
-            f"this alliance is locked to Kingdom #{alliance_kid}."
-        )
-    return (
-        f"Player is in Kingdom #{player_kid}, "
-        f"but this alliance is locked to Kingdom #{alliance_kid}."
-    )
+        pass
+    return f"This alliance only accepts members from Kingdom #{alliance_kid}."
 
 
 def check_alliance_kingdom(alliance_id: int, player_kid) -> "str | None":
@@ -74,19 +65,6 @@ def check_alliance_kingdom(alliance_id: int, player_kid) -> "str | None":
     if not ok:
         return KINGDOM_CHECK_UNAVAILABLE
     return kingdom_lock_reason(alliance_kid, player_kid)
-
-
-def _alliance_sync_in_flight(process_queue, alliance_id: int) -> bool:
-    """True if any sync work for this alliance is queued or running.
-
-    Checks both 'alliance_sync' (scheduled periodic syncs) and 'alliance_sync_manual'
-    (manual syncs via UI). Used to skip duplicate enqueues so the queue can't
-    pile up when interval < sync duration or admins click Sync All repeatedly.
-    """
-    return (
-        process_queue.has_queued_or_active("alliance_sync", alliance_id=alliance_id)
-        or process_queue.has_queued_or_active("alliance_sync_manual", alliance_id=alliance_id)
-    )
 
 
 class Alliance(commands.Cog):
@@ -191,8 +169,7 @@ class Alliance(commands.Cog):
                     cursor.execute("SELECT COUNT(*) FROM users WHERE alliance = ?", (alliance_id,))
                     member_count = cursor.fetchone()[0]
 
-                interval_text = f"{interval} minutes" if interval > 0 else "No automatic sync"
-                alliance_list += f"{theme.allianceIcon} **{alliance_id}: {name}**\n{theme.userIcon} Members: {member_count}\n{theme.timeIcon} Sync Interval: {interval_text}\n\n"
+                alliance_list += f"{theme.allianceIcon} **{alliance_id}: {name}**\n{theme.userIcon} Members: {member_count}\n\n"
 
             if not alliance_list:
                 alliance_list = "No alliances found."
@@ -345,12 +322,6 @@ class Alliance(commands.Cog):
                 custom_id="view_alliances"
             ))
             view.add_item(discord.ui.Button(
-                label="Check Alliance",
-                emoji=theme.searchIcon,
-                style=discord.ButtonStyle.primary,
-                custom_id="check_alliance"
-            ))
-            view.add_item(discord.ui.Button(
                 label="Back",
                 emoji=theme.backIcon,
                 style=discord.ButtonStyle.secondary,
@@ -366,156 +337,6 @@ class Alliance(commands.Cog):
     async def show_add_alliance_for(self, interaction: discord.Interaction):
         """Direct entry to Add Alliance flow (no operations sub-menu)."""
         await self.add_alliance(interaction)
-
-    async def sync_all_alliances(self, interaction: discord.Interaction):
-        """Alliance sync is disabled - there is no player-data API to refresh from."""
-        await interaction.response.send_message(
-            f"{theme.warnIcon} Alliance sync is no longer available - member nicknames, "
-            f"levels and kingdoms can't be refreshed automatically. Set member kingdoms under "
-            f"**Alliance Management -> Member Kingdoms**.",
-            ephemeral=True,
-        )
-        return
-
-        try:
-            allowed_alliance_ids, is_global = PermissionManager.get_admin_alliance_ids(
-                interaction.user.id, interaction.guild_id
-            )
-
-            if not is_global and not allowed_alliance_ids:
-                await interaction.response.send_message(
-                    f"{theme.deniedIcon} You don't have permission to sync any alliances.",
-                    ephemeral=True,
-                )
-                return
-
-            with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
-                cursor = conn.cursor()
-                if is_global:
-                    cursor.execute(
-                        "SELECT alliance_id, name FROM alliance_list ORDER BY name"
-                    )
-                else:
-                    placeholders = ",".join("?" * len(allowed_alliance_ids))
-                    cursor.execute(
-                        f"SELECT alliance_id, name FROM alliance_list "
-                        f"WHERE alliance_id IN ({placeholders}) ORDER BY name",
-                        allowed_alliance_ids,
-                    )
-                alliances = cursor.fetchall()
-
-            if not alliances:
-                await interaction.response.send_message(
-                    f"{theme.deniedIcon} No alliances found to sync.",
-                    ephemeral=True,
-                )
-                return
-
-            process_queue = self.bot.get_cog("ProcessQueue")
-            if not process_queue:
-                await interaction.response.send_message(
-                    f"{theme.deniedIcon} Process Queue module not found.",
-                    ephemeral=True,
-                )
-                return
-
-            if not self.bot.get_cog("AllianceSync"):
-                await interaction.response.send_message(
-                    f"{theme.deniedIcon} Alliance Sync module not found.",
-                    ephemeral=True,
-                )
-                return
-
-            eligible = []
-            skipped_pending = []
-            for alliance_id, name in alliances:
-                if _alliance_sync_in_flight(process_queue, alliance_id):
-                    skipped_pending.append((alliance_id, name))
-                else:
-                    eligible.append((alliance_id, name))
-
-            if not eligible:
-                await interaction.response.send_message(
-                    f"{theme.warnIcon} All {len(skipped_pending)} alliance(s) already have a "
-                    f"sync queued or running — nothing new to enqueue.",
-                    ephemeral=True,
-                )
-                return
-
-            queue_info = process_queue.get_queue_info()
-            initial_queue_pos = queue_info["queue_size"] + 1
-
-            description = (
-                f"{theme.upperDivider}\n"
-                f"{theme.chartIcon} **Type:** All Accessible Alliances\n"
-                f"{theme.allianceIcon} **Alliances:** {len(eligible)}\n"
-            )
-            if skipped_pending:
-                description += (
-                    f"{theme.warnIcon} **Skipped (already pending):** {len(skipped_pending)}\n"
-                )
-            description += (
-                f"{theme.pinIcon} **Status:** Queued\n"
-                f"{theme.levelIcon} **Queue Position:** {initial_queue_pos}\n"
-                f"{theme.lowerDivider}"
-            )
-
-            progress_embed = discord.Embed(
-                title=f"{theme.hourglassIcon} Sync All Alliances",
-                description=description,
-                color=theme.emColor1,
-            )
-            await interaction.response.send_message(embed=progress_embed, ephemeral=True)
-            msg = await interaction.original_response()
-
-            queued_alliances = []
-            for index, (alliance_id, name) in enumerate(eligible):
-                try:
-                    with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "SELECT channel_id FROM alliancesettings WHERE alliance_id = ?",
-                            (alliance_id,),
-                        )
-                        channel_data = cursor.fetchone()
-                    # Only a NULL channel_id (new alliance) falls back here; unreachable configured channels still skip.
-                    channel_id = channel_data[0] if channel_data else None
-                    channel = self.bot.get_channel(channel_id) if channel_id else interaction.channel
-                    if not channel:
-                        continue
-
-                    process_id = process_queue.enqueue(
-                        action="alliance_sync_manual",
-                        priority=ALLIANCE_CONTROL,
-                        alliance_id=alliance_id,
-                        details={
-                            "channel_id": channel.id,
-                            "alliance_name": name,
-                            "is_batch": True,
-                            "batch_info": {
-                                "current": index + 1,
-                                "total": len(eligible),
-                                "all_names": list(queued_alliances),
-                            },
-                        },
-                    )
-                    process_queue.attach_runtime_context(process_id, {
-                        "interaction_message": msg,
-                    })
-                    queued_alliances.append((alliance_id, name))
-                except Exception as e:
-                    logger.error(f"Error queuing alliance {name}: {e}")
-                    print(f"Error queuing alliance {name}: {e}")
-                    continue
-
-        except Exception as e:
-            logger.error(f"Error in sync_all_alliances: {e}")
-            print(f"Error in sync_all_alliances: {e}")
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    f"{theme.deniedIcon} An error occurred while queuing the sync.",
-                    ephemeral=True,
-                )
 
     async def show_edit_name_for(self, interaction: discord.Interaction, alliance_id: int):
         """Direct entry: rename a single alliance (no other settings)."""
@@ -573,8 +394,7 @@ class Alliance(commands.Cog):
             with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT interval, channel_id, start_time FROM alliancesettings "
-                    "WHERE alliance_id = ?",
+                    "SELECT channel_id FROM alliancesettings WHERE alliance_id = ?",
                     (alliance_id,),
                 )
                 settings_data = cursor.fetchone()
@@ -582,29 +402,12 @@ class Alliance(commands.Cog):
             modal = AllianceModal(
                 title="Edit Alliance",
                 default_name=alliance_data[1],
-                default_interval=str(settings_data[0] if settings_data else 0),
-                default_start_time=settings_data[2] if settings_data and settings_data[2] else "",
             )
             await interaction.response.send_modal(modal)
             await modal.wait()
 
             try:
                 alliance_name = modal.name.value.strip()
-                interval = int(modal.interval.value.strip())
-                start_time_raw = modal.start_time.value.strip() if modal.start_time.value else ""
-
-                start_time = None
-                if start_time_raw:
-                    import re
-                    if re.match(r'^([01]?\d|2[0-3]):([0-5]\d)$', start_time_raw):
-                        parts = start_time_raw.split(':')
-                        start_time = f"{int(parts[0]):02d}:{int(parts[1]):02d}"
-                    else:
-                        await modal.interaction.response.send_message(
-                            f"{theme.deniedIcon} Invalid start time format. Use HH:MM.",
-                            ephemeral=True,
-                        )
-                        return
 
                 channel_embed = discord.Embed(
                     title=f"{theme.retryIcon} Channel Selection",
@@ -612,7 +415,7 @@ class Alliance(commands.Cog):
                         f"**Current Channel Information**\n"
                         f"{theme.upperDivider}\n"
                         f"{theme.announceIcon} Current channel: "
-                        f"{f'<#{settings_data[1]}>' if settings_data else 'Not set'}\n"
+                        f"{f'<#{settings_data[0]}>' if settings_data else 'Not set'}\n"
                         f"**Total Channels:** {len(interaction.guild.text_channels)}\n"
                         f"{theme.lowerDivider}"
                     ),
@@ -630,31 +433,23 @@ class Alliance(commands.Cog):
                             )
                             if settings_data:
                                 cursor.execute(
-                                    "UPDATE alliancesettings SET channel_id = ?, interval = ?, "
-                                    "start_time = ? WHERE alliance_id = ?",
-                                    (channel_id, interval, start_time, alliance_id),
+                                    "UPDATE alliancesettings SET channel_id = ? WHERE alliance_id = ?",
+                                    (channel_id, alliance_id),
                                 )
                             else:
                                 cursor.execute(
-                                    "INSERT INTO alliancesettings "
-                                    "(alliance_id, channel_id, interval, start_time) "
-                                    "VALUES (?, ?, ?, ?)",
-                                    (alliance_id, channel_id, interval, start_time),
+                                    "INSERT INTO alliancesettings (alliance_id, channel_id) "
+                                    "VALUES (?, ?)",
+                                    (alliance_id, channel_id),
                                 )
                             conn.commit()
 
-                        start_time_display = (
-                            f"{start_time} UTC" if start_time
-                            else "Not set (starts on bot startup)"
-                        )
                         result_embed = discord.Embed(
                             title=f"{theme.verifiedIcon} Alliance Successfully Updated",
                             description=(
                                 f"**🛡️ Name:** {alliance_name}\n"
                                 f"**🔢 ID:** {alliance_id}\n"
-                                f"**📢 Channel:** <#{channel_id}>\n"
-                                f"**⏱️ Sync Interval:** {interval} minutes\n"
-                                f"**🕐 Fixed Start Time:** {start_time_display}"
+                                f"**{theme.announceIcon} Channel:** <#{channel_id}>"
                             ),
                             color=theme.emColor3,
                         )
@@ -679,10 +474,6 @@ class Alliance(commands.Cog):
                 )
                 await modal.interaction.response.send_message(
                     embed=channel_embed, view=view, ephemeral=True
-                )
-            except ValueError:
-                await modal.interaction.response.send_message(
-                    f"{theme.deniedIcon} Invalid interval value.", ephemeral=True
                 )
             except Exception as e:
                 logger.error(f"Error in show_edit_alliance_for submit: {e}")
@@ -711,8 +502,7 @@ class Alliance(commands.Cog):
             # Only handle custom_ids that belong to this cog
             handled_ids = {
                 "alliance_operations", "back_to_alliance_management", "edit_alliance",
-                "check_alliance", "add_alliance", "delete_alliance", "view_alliances",
-                "alliance_check_select"
+                "add_alliance", "delete_alliance", "view_alliances",
             }
             if custom_id not in handled_ids:
                 return
@@ -738,236 +528,6 @@ class Alliance(commands.Cog):
 
                 elif custom_id == "edit_alliance":
                     await self.edit_alliance(interaction)
-
-                elif custom_id == "check_alliance":
-                    with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
-                        cursor = conn.cursor()
-                        cursor.execute("""
-                            SELECT a.alliance_id, a.name, COALESCE(s.interval, 0) as interval
-                            FROM alliance_list a
-                            LEFT JOIN alliancesettings s ON a.alliance_id = s.alliance_id
-                            ORDER BY a.name
-                        """)
-                        alliances = cursor.fetchall()
-
-                    if not alliances:
-                        await interaction.response.send_message("No alliances found to check.", ephemeral=True)
-                        return
-
-                    options = [
-                        discord.SelectOption(
-                            label="Check All Alliances",
-                            value="all",
-                            description="Start control process for all alliances",
-                            emoji=theme.retryIcon
-                        )
-                    ]
-                    
-                    options.extend([
-                        discord.SelectOption(
-                            label=f"{name[:40]}",
-                            value=str(alliance_id),
-                            description=f"Sync Interval: {interval} minutes"
-                        ) for alliance_id, name, interval in alliances
-                    ])
-
-                    select = discord.ui.Select(
-                        placeholder="Select an alliance to check",
-                        options=options,
-                        custom_id="alliance_check_select"
-                    )
-
-                    async def alliance_check_callback(select_interaction: discord.Interaction):
-                        try:
-                            selected_value = select_interaction.data["values"][0]
-
-                            if not self.bot.get_cog('AllianceSync'):
-                                await select_interaction.response.send_message("Alliance Sync module not found.", ephemeral=True)
-                                return
-
-                            # Get the ProcessQueue cog
-                            process_queue = self.bot.get_cog('ProcessQueue')
-                            if not process_queue:
-                                await select_interaction.response.send_message(
-                                    f"{theme.deniedIcon} Process Queue module not found.",
-                                    ephemeral=True
-                                )
-                                return
-
-                            if selected_value == "all":
-                                # Get initial queue position
-                                queue_info = process_queue.get_queue_info()
-                                initial_queue_pos = queue_info['queue_size'] + 1
-                                
-                                progress_embed = discord.Embed(
-                                    title=f"{theme.hourglassIcon} Alliance Control Operation",
-                                    description=(
-                                        f"{theme.upperDivider}\n"
-                                        f"{theme.chartIcon} **Type:** All Alliances ({len(alliances)} total)\n"
-                                        f"{theme.allianceIcon} **Alliances:** {len(alliances)} alliances\n"
-                                        f"{theme.pinIcon} **Status:** Queued\n"
-                                        f"{theme.levelIcon} **Queue Position:** {initial_queue_pos}\n"
-                                        f"{theme.lowerDivider}"
-                                    ),
-                                    color=theme.emColor1
-                                )
-                                eligible = [
-                                    (aid, name, interval) for aid, name, interval in alliances
-                                    if not _alliance_sync_in_flight(process_queue, aid)
-                                ]
-                                skipped_count = len(alliances) - len(eligible)
-                                if not eligible:
-                                    await select_interaction.response.send_message(
-                                        f"{theme.warnIcon} All {skipped_count} alliance(s) already have a "
-                                        f"sync queued or running — nothing new to enqueue.",
-                                        ephemeral=True,
-                                    )
-                                    return
-
-                                await select_interaction.response.send_message(embed=progress_embed, ephemeral=True)
-                                msg = await select_interaction.original_response()
-                                message_id = msg.id
-
-                                # Queue all alliance operations at once
-                                queued_alliances = []
-                                for index, (alliance_id, name, _) in enumerate(eligible):
-                                    try:
-                                        with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
-                                            cursor = conn.cursor()
-                                            cursor.execute("""
-                                                SELECT channel_id FROM alliancesettings WHERE alliance_id = ?
-                                            """, (alliance_id,))
-                                            channel_data = cursor.fetchone()
-                                        # Only a NULL channel_id falls back to the invoking channel, matching Sync All.
-                                        channel_id = channel_data[0] if channel_data else None
-                                        channel = self.bot.get_channel(channel_id) if channel_id else select_interaction.channel
-                                        if not channel:
-                                            continue
-
-                                        process_id = process_queue.enqueue(
-                                            action='alliance_sync_manual',
-                                            priority=ALLIANCE_CONTROL,
-                                            alliance_id=alliance_id,
-                                            details={
-                                                'channel_id': channel.id,
-                                                'alliance_name': name,
-                                                'is_batch': True,
-                                                'batch_info': {
-                                                    'current': index + 1,
-                                                    'total': len(eligible),
-                                                    'all_names': list(queued_alliances),
-                                                },
-                                            },
-                                        )
-                                        # Attach interaction message for live progress updates
-                                        process_queue.attach_runtime_context(process_id, {
-                                            'interaction_message': msg,
-                                        })
-                                        queued_alliances.append((alliance_id, name))
-
-                                    except Exception as e:
-                                        logger.error(f"Error queuing alliance {name}: {e}")
-                                        print(f"Error queuing alliance {name}: {e}")
-                                        continue
-
-                                if skipped_count:
-                                    await select_interaction.followup.send(
-                                        f"{theme.warnIcon} Skipped **{skipped_count}** alliance(s) "
-                                        f"that already had a sync queued or running.",
-                                        ephemeral=True,
-                                    )
-
-                            else:
-                                alliance_id = int(selected_value)
-                                with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
-                                    cursor = conn.cursor()
-                                    cursor.execute("""
-                                        SELECT a.name, s.channel_id
-                                        FROM alliance_list a
-                                        LEFT JOIN alliancesettings s ON a.alliance_id = s.alliance_id
-                                        WHERE a.alliance_id = ?
-                                    """, (alliance_id,))
-                                    alliance_data = cursor.fetchone()
-
-                                if not alliance_data:
-                                    await select_interaction.response.send_message("Alliance not found.", ephemeral=True)
-                                    return
-
-                                alliance_name, channel_id = alliance_data
-
-                                if _alliance_sync_in_flight(process_queue, alliance_id):
-                                    await select_interaction.response.send_message(
-                                        f"{theme.warnIcon} **{alliance_name}** already has a sync queued "
-                                        f"or running — skipped to avoid duplicate work.",
-                                        ephemeral=True,
-                                    )
-                                    return
-
-                                channel = self.bot.get_channel(channel_id) if channel_id else select_interaction.channel
-
-                                # Get queue info for position
-                                queue_info = process_queue.get_queue_info()
-                                queue_position = queue_info['queue_size'] + 1
-
-                                status_embed = discord.Embed(
-                                    title=f"{theme.hourglassIcon} Alliance Control Operation",
-                                    description=(
-                                        f"{theme.upperDivider}\n"
-                                        f"{theme.chartIcon} **Type:** Single Alliance\n"
-                                        f"{theme.allianceIcon} **Alliance:** {alliance_name}\n"
-                                        f"{theme.pinIcon} **Status:** Queued\n"
-                                        f"{theme.levelIcon} **Queue Position:** {queue_position}\n"
-                                        f"{theme.lowerDivider}"
-                                    ),
-                                    color=theme.emColor1
-                                )
-                                await select_interaction.response.send_message(embed=status_embed, ephemeral=True)
-                                msg = await select_interaction.original_response()
-
-                                if not channel:
-                                    return
-
-                                process_id = process_queue.enqueue(
-                                    action='alliance_sync_manual',
-                                    priority=ALLIANCE_CONTROL,
-                                    alliance_id=alliance_id,
-                                    details={
-                                        'channel_id': channel.id,
-                                        'alliance_name': alliance_name,
-                                        'is_batch': False,
-                                    },
-                                )
-                                process_queue.attach_runtime_context(process_id, {
-                                    'interaction_message': msg,
-                                })
-
-                        except Exception as e:
-                            logger.error(f"Alliance check error: {e}")
-                            print(f"Alliance check error: {e}")
-                            await select_interaction.response.send_message(
-                                "An error occurred during the control process.",
-                                ephemeral=True
-                            )
-
-                    select.callback = alliance_check_callback
-                    view = discord.ui.View()
-                    view.add_item(select)
-
-                    embed = discord.Embed(
-                        title=f"{theme.searchIcon} Alliance Control",
-                        description=(
-                            f"Please select an alliance to check:\n\n"
-                            f"**Information**\n"
-                            f"{theme.upperDivider}\n"
-                            f"• Select 'Check All Alliances' to process all alliances\n"
-                            f"• Control process may take a few minutes\n"
-                            f"• Results will be shared in the designated channel\n"
-                            f"• Other controls will be queued during the process\n"
-                            f"{theme.lowerDivider}"
-                        ),
-                        color=theme.emColor1
-                    )
-                    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
                 elif custom_id == "add_alliance":
                     await self.add_alliance(interaction)
@@ -1051,7 +611,6 @@ class Alliance(commands.Cog):
             discord.SelectOption(
                 label=f"{name} (ID: {alliance_id})",
                 value=f"{alliance_id}",
-                description=f"Interval: {interval} minutes"
             ) for alliance_id, name, interval, _ in alliances
         ]
         
@@ -1138,7 +697,7 @@ class Alliance(commands.Cog):
                 with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
                     cursor = conn.cursor()
                     cursor.execute("""
-                        SELECT interval, channel_id, start_time
+                        SELECT channel_id
                         FROM alliancesettings
                         WHERE alliance_id = ?
                     """, (alliance_id,))
@@ -1147,40 +706,19 @@ class Alliance(commands.Cog):
                 modal = AllianceModal(
                     title="Edit Alliance",
                     default_name=alliance_data[1],
-                    default_interval=str(settings_data[0] if settings_data else 0),
-                    default_start_time=settings_data[2] if settings_data and settings_data[2] else ""
                 )
                 await select_interaction.response.send_modal(modal)
                 await modal.wait()
 
                 try:
                     alliance_name = modal.name.value.strip()
-                    interval = int(modal.interval.value.strip())
-                    start_time_raw = modal.start_time.value.strip() if modal.start_time.value else ""
-
-                    # Validate start_time format (HH:MM) if provided
-                    start_time = None
-                    if start_time_raw:
-                        import re
-                        if re.match(r'^([01]?\d|2[0-3]):([0-5]\d)$', start_time_raw):
-                            # Normalize to HH:MM format
-                            parts = start_time_raw.split(':')
-                            start_time = f"{int(parts[0]):02d}:{int(parts[1]):02d}"
-                        else:
-                            error_embed = discord.Embed(
-                                title="Error",
-                                description="Invalid start time format. Please use HH:MM (e.g., 14:00).",
-                                color=theme.emColor2
-                            )
-                            await modal.interaction.response.send_message(embed=error_embed, ephemeral=True)
-                            return
 
                     embed = discord.Embed(
                         title=f"{theme.retryIcon} Channel Selection",
                         description=(
                             f"**Current Channel Information**\n"
                             f"{theme.upperDivider}\n"
-                            f"{theme.announceIcon} Current channel: {f'<#{settings_data[1]}>' if settings_data else 'Not set'}\n"
+                            f"{theme.announceIcon} Current channel: {f'<#{settings_data[0]}>' if settings_data else 'Not set'}\n"
                             f"**Page:** 1/1\n"
                             f"**Total Channels:** {len(interaction.guild.text_channels)}\n"
                             f"{theme.lowerDivider}"
@@ -1200,14 +738,14 @@ class Alliance(commands.Cog):
                                 if settings_data:
                                     cursor.execute("""
                                         UPDATE alliancesettings
-                                        SET channel_id = ?, interval = ?, start_time = ?
+                                        SET channel_id = ?
                                         WHERE alliance_id = ?
-                                    """, (channel_id, interval, start_time, alliance_id))
+                                    """, (channel_id, alliance_id))
                                 else:
                                     cursor.execute("""
-                                        INSERT INTO alliancesettings (alliance_id, channel_id, interval, start_time)
-                                        VALUES (?, ?, ?, ?)
-                                    """, (alliance_id, channel_id, interval, start_time))
+                                        INSERT INTO alliancesettings (alliance_id, channel_id)
+                                        VALUES (?, ?)
+                                    """, (alliance_id, channel_id))
 
                                 conn.commit()
 
@@ -1217,13 +755,10 @@ class Alliance(commands.Cog):
                                 color=theme.emColor3
                             )
 
-                            start_time_display = f"{start_time} UTC" if start_time else "Not set (starts on bot startup)"
                             info_section = (
                                 f"**🛡️ Alliance Name**\n{alliance_name}\n\n"
                                 f"**🔢 Alliance ID**\n{alliance_id}\n\n"
-                                f"**📢 Channel**\n<#{channel_id}>\n\n"
-                                f"**⏱️ Sync Interval**\n{interval} minutes\n\n"
-                                f"**🕐 Fixed Start Time**\n{start_time_display}"
+                                f"**{theme.announceIcon} Channel**\n<#{channel_id}>"
                             )
                             result_embed.add_field(name="Alliance Details", value=info_section, inline=False)
 
@@ -1244,13 +779,6 @@ class Alliance(commands.Cog):
                     view = PaginatedChannelView(channels, channel_select_callback)
                     await modal.interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-                except ValueError:
-                    error_embed = discord.Embed(
-                        title="Error",
-                        description="Invalid interval value. Please enter a number.",
-                        color=theme.emColor2
-                    )
-                    await modal.interaction.response.send_message(embed=error_embed, ephemeral=True)
                 except Exception as e:
                     error_embed = discord.Embed(
                         title="Error",
@@ -1584,7 +1112,7 @@ class Alliance(commands.Cog):
                 await interaction.followup.send(embed=error_embed, ephemeral=True)
 
 class AllianceModal(discord.ui.Modal):
-    def __init__(self, title: str, default_name: str = "", default_interval: str = "0", default_start_time: str = ""):
+    def __init__(self, title: str, default_name: str = ""):
         super().__init__(title=title)
 
         self.name = discord.ui.TextInput(
@@ -1594,23 +1122,6 @@ class AllianceModal(discord.ui.Modal):
             required=True
         )
         self.add_item(self.name)
-
-        self.interval = discord.ui.TextInput(
-            label="Sync Interval (minutes)",
-            placeholder="Enter interval (0 to disable)",
-            default=default_interval,
-            required=True
-        )
-        self.add_item(self.interval)
-
-        self.start_time = discord.ui.TextInput(
-            label="Fixed Start Time (UTC, optional)",
-            placeholder="HH:MM (e.g., 14:00) or leave empty",
-            default=default_start_time,
-            required=False,
-            max_length=5
-        )
-        self.add_item(self.start_time)
 
     async def on_submit(self, interaction: discord.Interaction):
         self.interaction = interaction
@@ -1638,11 +1149,11 @@ class PostCreateChannelPromptView(discord.ui.View):
             title=f"{theme.verifiedIcon} Alliance Created: {self.alliance_name}",
             description=(
                 f"{theme.upperDivider}\n"
-                f"Set up this alliance's channels now. A Sync Log and Redemption Log "
-                f"are recommended so sync results and gift redemptions get logged.\n\n"
+                f"Set up this alliance's channels now. A Redemption Log is recommended "
+                f"so gift code results get logged.\n\n"
                 f"**Controls**\n"
                 f"{theme.settingsIcon} **Set Up Channels**\n"
-                f"└ Configure the ID, Activity Log, Sync Log, and Redemption Log channels\n\n"
+                f"└ Configure the ID, Activity Log, and Redemption Log channels\n\n"
                 f"{theme.forwardIcon} **Skip for Now**\n"
                 f"└ Go to the alliance hub (Channel Setup stays available there)\n"
                 f"{theme.lowerDivider}"
@@ -1679,8 +1190,6 @@ class AddAllianceModal(discord.ui.Modal):
     backfill - leave blank for none. Locking is a separate toggle on the hub.
     Creation ends on a prompt encouraging Channel Setup for the new alliance."""
 
-    # Daily by default
-    DEFAULT_INTERVAL_MINUTES = 1440
 
     def __init__(self, cog):
         super().__init__(title="Add Alliance")
@@ -1746,8 +1255,8 @@ class AddAllianceModal(discord.ui.Modal):
                 alliance_id = cursor.lastrowid
                 cursor.execute(
                     "INSERT INTO alliancesettings (alliance_id, channel_id, interval, start_time) "
-                    "VALUES (?, NULL, ?, NULL)",
-                    (alliance_id, self.DEFAULT_INTERVAL_MINUTES),
+                    "VALUES (?, NULL, 0, NULL)",
+                    (alliance_id,),
                 )
                 conn.commit()
 

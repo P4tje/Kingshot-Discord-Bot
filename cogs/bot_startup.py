@@ -451,13 +451,10 @@ class BotStartup(commands.Cog):
                                         else:
                                             info_parts.append(f"{theme.globeIcon} Server ID: {server_id}")
 
-                                alliance_cur.execute("SELECT channel_id, interval FROM alliancesettings WHERE alliance_id = ?", (alliance_id,))
+                                alliance_cur.execute("SELECT channel_id FROM alliancesettings WHERE alliance_id = ?", (alliance_id,))
                                 settings = alliance_cur.fetchone()
-                                if settings:
-                                    if settings[0]:
-                                        info_parts.append(f"{theme.announceIcon} Channel: <#{settings[0]}>")
-                                    interval_text = f"{theme.timeIcon} Auto Check: {settings[1]} minutes" if settings[1] and settings[1] > 0 else f"{theme.timeIcon} No Auto Check"
-                                    info_parts.append(interval_text)
+                                if settings and settings[0]:
+                                    info_parts.append(f"{theme.announceIcon} Channel: <#{settings[0]}>")
 
                                 gift_cur.execute("SELECT status FROM giftcodecontrol WHERE alliance_id = ?", (alliance_id,))
                                 gift_status = gift_cur.fetchone()

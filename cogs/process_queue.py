@@ -21,6 +21,12 @@ GIFT_REDEEM = 200
 MEMBER_ADD = 300
 ALLIANCE_CONTROL = 400
 ALLIANCE_SYNC = 500
+STATE_RESOLVE = 600         # slowest work in the bot; always yields to everything else
+
+# Backstop: a handler past this is wedged, not busy. state_resolve runs for hours by
+# design and yields cooperatively instead.
+HANDLER_TIMEOUT_SECONDS = 7200
+HANDLER_TIMEOUT_EXEMPT = ('state_resolve',)
 
 
 class PreemptedException(Exception):
@@ -237,14 +243,17 @@ class ProcessQueue(commands.Cog):
             'is_processing': self._current_process is not None,
         }
 
-    def get_queued_processes_by_action(self, action: str) -> list:
-        """Get all queued processes for a given action type."""
-        self.cursor.execute("""
+    def get_queued_processes_by_action(self, action: str, statuses=('queued',)) -> list:
+        """Get processes for a given action type. Pass statuses=('queued','active') to
+        include the running one - its details carry live progress."""
+        statuses = tuple(statuses)
+        placeholders = ",".join("?" for _ in statuses)
+        self.cursor.execute(f"""
             SELECT id, action, status, priority, alliance_id, details, created_at
             FROM process_queue
-            WHERE status = 'queued' AND action = ?
+            WHERE status IN ({placeholders}) AND action = ?
             ORDER BY priority ASC, id ASC
-        """, (action,))
+        """, (*statuses, action))
         return [self._row_to_dict(row) for row in self.cursor.fetchall()]
 
     def get_position(self, process_id: int) -> Optional[int]:
@@ -342,9 +351,18 @@ class ProcessQueue(commands.Cog):
                 preempted = False
                 try:
                     logger.info(f"ProcessQueue: Executing {action} (id={process['id']}, alliance={process['alliance_id']})")
-                    await handler(process)
+                    if action in HANDLER_TIMEOUT_EXEMPT:
+                        await handler(process)
+                    else:
+                        await asyncio.wait_for(handler(process), timeout=HANDLER_TIMEOUT_SECONDS)
                     self.mark_completed(process['id'])
                     logger.info(f"ProcessQueue: Completed {action} (id={process['id']})")
+                except asyncio.TimeoutError:
+                    msg = (f"ProcessQueue: {action} (id={process['id']}, alliance={process['alliance_id']}) "
+                           f"exceeded {HANDLER_TIMEOUT_SECONDS}s and was abandoned so the queue can continue")
+                    logger.error(msg)
+                    print(msg)
+                    self.mark_failed(process['id'])
                 except PreemptedException:
                     preempted = True
                     self.requeue(process['id'])
@@ -406,7 +424,7 @@ class ProcessQueue(commands.Cog):
         """Reset interrupted processes and start the processor.
 
         Waits briefly before starting so that other cogs have time to register
-        their handlers (gift_operations, alliance_sync, alliance_member_operations).
+        their handlers (gift_operations, alliance_member_operations).
         """
         await self._ensure_processor_started()
 

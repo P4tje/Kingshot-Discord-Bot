@@ -21,6 +21,17 @@ LEVEL_MAPPING = {
     80: "TC 10", 81: "TC 10-1", 82: "TC 10-2", 83: "TC 10-3", 84: "TC 10-4",
 }
 
+MAX_FURNACE_LEVEL = max(LEVEL_MAPPING)
+MAX_STATE = 99999           # ~4 digits today; 5 leaves headroom without accepting junk
+
+
+def _squash(text: str) -> str:
+    """Comparison key, so 'TC 10-2' == 'tc10-2' == 'TC102'."""
+    return "".join(c for c in str(text).upper() if c.isalnum())
+
+
+_LEVEL_LOOKUP = {_squash(name): lv for lv, name in LEVEL_MAPPING.items()}
+
 
 def format_furnace_level(raw) -> str:
     """Display name for a raw API stove level (e.g. 80 -> 'TC 10'); <= 30 -> 'Level N'."""
@@ -31,3 +42,30 @@ def format_furnace_level(raw) -> str:
     if lv > 30:
         return LEVEL_MAPPING.get(lv, f"Level {lv}")
     return f"Level {lv}"
+
+
+def parse_furnace_level(text):
+    """Raw stove level from a display name ('TC 10-2') or a number ('82'), else None."""
+    if text is None:
+        return None
+    raw = str(text).strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        lv = int(raw)
+        return lv if 0 <= lv <= MAX_FURNACE_LEVEL else None
+    squashed = _squash(raw)
+    if squashed in _LEVEL_LOOKUP:
+        return _LEVEL_LOOKUP[squashed]
+    # "Level 25" - format_furnace_level's pre-TC output.
+    if squashed.startswith("LEVEL"):
+        digits = squashed[len("LEVEL"):]
+        if digits.isdigit() and int(digits) <= MAX_FURNACE_LEVEL:
+            return int(digits)
+    return None
+
+
+def parse_state(text):
+    """A typed kingdom as an int in 1..MAX_STATE, or None."""
+    raw = str(text).strip() if text is not None else ""
+    return int(raw) if raw.isdigit() and 1 <= int(raw) <= MAX_STATE else None
