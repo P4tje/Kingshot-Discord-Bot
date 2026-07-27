@@ -1254,8 +1254,8 @@ class AddAllianceModal(discord.ui.Modal):
                 )
                 alliance_id = cursor.lastrowid
                 cursor.execute(
-                    "INSERT INTO alliancesettings (alliance_id, channel_id, interval, start_time) "
-                    "VALUES (?, NULL, 0, NULL)",
+                    "INSERT INTO alliancesettings (alliance_id, channel_id, interval) "
+                    "VALUES (?, NULL, 0)",
                     (alliance_id,),
                 )
                 conn.commit()
