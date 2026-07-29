@@ -150,7 +150,7 @@ class AllianceIDChannel(commands.Cog):
             except discord.HTTPException:
                 pass
 
-    async def warn_invalid_format(self, message):
+    async def warn_invalid_format(self, message, alliance_id=None):
         # Default off: silently ignore non-numeric posts in ID channels unless
         # the admin has opted in. Avoids embarrassing X-emoji spam if a busy
         # general channel was accidentally configured as an ID channel.
@@ -166,9 +166,14 @@ class AllianceIDChannel(commands.Cog):
             return
 
         self.invalid_format_warnings[channel_id] = now
+        if alliance_id is not None and await asyncio.to_thread(is_multistate, alliance_id):
+            hint = ("Please post your ID and kingdom like `12345678 245`, "
+                    "or `12345678, Name, TC 10, 245` to include details.")
+        else:
+            hint = ("Please post an ID like `12345678`, "
+                    "or `12345678, Name, TC 10` to include details.")
         await self._safe_react_reply(
-            message, theme.deniedIcon,
-            "Please post an ID like `12345678`, or `12345678, Name, TC 10, 1234` to include details.",
+            message, theme.deniedIcon, hint,
             delete_after=settings['delete_after'],
         )
 
@@ -273,7 +278,7 @@ class AllianceIDChannel(commands.Cog):
             alliance_id = channel_info[0]
             parsed = parse_id_post(message.content)
             if parsed is None:
-                await self.warn_invalid_format(message)
+                await self.warn_invalid_format(message, alliance_id)
                 return
 
             fid, given_name, given_level, given_kingdom = parsed
@@ -434,7 +439,7 @@ class AllianceIDChannel(commands.Cog):
 
                     parsed = parse_id_post(message.content)
                     if parsed is None:
-                        await self.warn_invalid_format(message)
+                        await self.warn_invalid_format(message, alliance_id)
                         continue
 
                     fid, given_name, given_level, given_kingdom = parsed
@@ -490,12 +495,24 @@ class AllianceIDChannel(commands.Cog):
             else:
                 state_line = f"{theme.deniedIcon} No ID channel configured for this alliance."
 
+            if await asyncio.to_thread(is_multistate, alliance_id):
+                format_lines = (
+                    f"This alliance spans several kingdoms, so members post their ID **and** "
+                    f"kingdom together: `12345678 245`.\n"
+                    f"To fill in their details too: `12345678, Name, TC 10, 245`.\n"
+                )
+            else:
+                format_lines = (
+                    f"Members post just their ID: `12345678`.\n"
+                    f"To fill in their details too: `12345678, Name, TC 10`.\n"
+                )
+
             embed = discord.Embed(
                 title=f"{theme.fidIcon} {alliance_name} — ID Channel",
                 description=(
                     f"Players can post their in-game ID in this channel and the "
                     f"bot will verify and add them to the alliance.\n"
-                    f"Multistate alliances: members post their ID **and** kingdom together, e.g. `12345678 245`.\n"
+                    f"{format_lines}"
                     f"{theme.upperDivider}\n"
                     f"{state_line}\n"
                     f"{theme.lowerDivider}"
