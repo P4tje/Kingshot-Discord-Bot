@@ -664,6 +664,7 @@ class AllianceManagementEntryView(discord.ui.View):
             "alliance_entry_transfer": can_transfer,
             "alliance_entry_export": is_server_or_above,
             "alliance_entry_registration": is_global_or_above,
+            "alliance_entry_member_states": is_global_or_above,
         }
         for child in self.children:
             if isinstance(child, discord.ui.Button):

@@ -6,6 +6,7 @@ import logging
 import discord
 
 from .bot_level_mapping import parse_state
+from .permission_handler import PermissionManager
 from .pimp_my_bot import theme, safe_edit_message, check_interaction_user, notify_view_expired
 
 logger = logging.getLogger('gift')
@@ -38,6 +39,14 @@ def _catchup_lines(cog):
 
 
 async def show_state_management(cog, interaction: discord.Interaction):
+    # Every action here spans all alliances, so it's Global-only regardless of the button gate.
+    _, is_global = PermissionManager.is_admin(interaction.user.id)
+    if not is_global:
+        await interaction.response.send_message(
+            f"{theme.deniedIcon} Only global administrators can manage member kingdoms.",
+            ephemeral=True,
+        )
+        return
     view = StateManagementView(cog, interaction.user.id)
     await safe_edit_message(interaction, embed=await view.build_embed(), view=view, content=None)
 

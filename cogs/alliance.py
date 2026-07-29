@@ -943,11 +943,6 @@ class Alliance(commands.Cog):
 
             with sqlite3.connect('db/settings.sqlite', timeout=30.0) as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM invalid_id_tracker WHERE alliance_id = ?", (str(alliance_id),))
-                invalid_tracker_count = cursor.fetchone()[0]
-
-            with sqlite3.connect('db/settings.sqlite', timeout=30.0) as conn:
-                cursor = conn.cursor()
                 cursor.execute("SELECT COUNT(*) FROM alliance_logs WHERE alliance_id = ?", (alliance_id,))
                 alliance_logs_count = cursor.fetchone()[0]
 
@@ -965,7 +960,6 @@ class Alliance(commands.Cog):
                     f"{theme.allianceIcon} Admin Server Records: {admin_server_count}\n"
                     f"{theme.announceIcon} Gift Channels: {gift_channels_count}\n"
                     f"{theme.chartIcon} Gift Code Controls: {gift_code_control_count}\n"
-                    f"{theme.deniedIcon} Invalid ID Tracker: {invalid_tracker_count}\n"
                     f"{theme.listIcon} Alliance Logs: {alliance_logs_count}\n\n"
                     f"**{theme.warnIcon} WARNING: This action cannot be undone!**"
                 ),
@@ -989,9 +983,6 @@ class Alliance(commands.Cog):
                         cursor = conn.cursor()
                         cursor.execute("DELETE FROM adminserver WHERE alliances_id = ?", (alliance_id,))
                         admin_server_count = cursor.rowcount
-
-                        cursor.execute("DELETE FROM invalid_id_tracker WHERE alliance_id = ?", (str(alliance_id),))
-                        invalid_tracker_deleted = cursor.rowcount
 
                         cursor.execute("DELETE FROM alliance_logs WHERE alliance_id = ?", (alliance_id,))
                         alliance_logs_deleted = cursor.rowcount
@@ -1029,7 +1020,6 @@ class Alliance(commands.Cog):
                             f"{theme.allianceIcon} Admin Server Records: {admin_server_count}\n"
                             f"{theme.announceIcon} Gift Channels: {gift_channels_count}\n"
                             f"{theme.chartIcon} Gift Code Controls: {gift_code_control_count}\n"
-                            f"{theme.deniedIcon} Invalid ID Tracker: {invalid_tracker_deleted}\n"
                             f"{theme.listIcon} Alliance Logs: {alliance_logs_deleted}"
                         ),
                         color=theme.emColor3

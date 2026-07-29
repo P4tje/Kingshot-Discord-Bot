@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from .pimp_my_bot import theme
 from .alliance import check_alliance_kingdom
 from .gift_state_resolver import verify_add_state, get_alliance_kid
-from .bot_level_mapping import parse_state
+from .bot_level_mapping import parse_furnace_level, parse_state
+from .alliance_member_edit import apply_member_edit
 
 logger = logging.getLogger('alliance')
 
@@ -164,17 +165,29 @@ class AllianceRegistration(commands.Cog):
         fid="Your In-Game ID",
         alliance="Your Alliance Name",
         kingdom="Your kingdom number - only needed if your alliance spans several kingdoms",
+        name="Your in-game name",
+        level="Your town center level, like 30 or TC 10",
     )
     @discord.app_commands.rename(fid="id")
     @discord.app_commands.autocomplete(alliance=alliance_autocomplete)
     async def register(self, interaction: discord.Interaction, fid: int, alliance: int,
-                       kingdom: "int | None" = None):
+                       kingdom: "int | None" = None, name: "str | None" = None,
+                       level: "str | None" = None):
         if not self.is_registration_enabled():
             await interaction.response.send_message(
                 f"{theme.deniedIcon} Registration is currently disabled.",
                 ephemeral=True
             )
             return
+
+        furnace_lv = None
+        if level is not None:
+            furnace_lv = parse_furnace_level(level)
+            if furnace_lv is None:
+                await interaction.response.send_message(
+                    f"{theme.deniedIcon} `{level}` isn't a town center level. "
+                    f"Try something like `30` or `TC 10`.", ephemeral=True)
+                return
 
         caller_id = interaction.user.id
         current_server_id = interaction.guild_id if interaction.guild else None
@@ -200,9 +213,13 @@ class AllianceRegistration(commands.Cog):
         if existing and existing[1] == caller_id:
             existing_server_id = existing[2]
             if existing_server_id == current_server_id:
+                changed = []
+                if name or furnace_lv:
+                    changed = await asyncio.to_thread(apply_member_edit, fid,
+                                                      nickname=name, furnace_lv=furnace_lv)
+                note = f"Updated your {' and '.join(changed)}." if changed else "Nothing to change."
                 await interaction.response.send_message(
-                    f"{theme.verifiedIcon} ID `{fid}` is already registered to you here. "
-                    f"Nothing to change.",
+                    f"{theme.verifiedIcon} ID `{fid}` is already registered to you here. {note}",
                     ephemeral=True,
                 )
                 return
@@ -221,6 +238,9 @@ class AllianceRegistration(commands.Cog):
 
         if existing:
             self._attach_discord_to_existing(fid, caller_id, current_server_id)
+            if name or furnace_lv:
+                await asyncio.to_thread(apply_member_edit, fid,
+                                        nickname=name, furnace_lv=furnace_lv)
             await self._send_register_success(interaction, fid, caller_id, action="linked")
             return
 
@@ -249,7 +269,7 @@ class AllianceRegistration(commands.Cog):
             await interaction.followup.send(f"{theme.deniedIcon} {kingdom_error}", ephemeral=True)
             return
 
-        user_data = {"nickname": f"Player {fid}", "stove_lv": 0, "kid": kid}
+        user_data = {"nickname": name or f"Player {fid}", "stove_lv": furnace_lv or 0, "kid": kid}
         self._insert_new_user(fid, user_data, alliance, caller_id, current_server_id)
         await self._send_register_success(interaction, fid, caller_id, action="registered")
 

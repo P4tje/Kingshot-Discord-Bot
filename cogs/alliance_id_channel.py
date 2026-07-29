@@ -11,11 +11,36 @@ import asyncio
 import time
 from discord.ext import tasks
 from .permission_handler import PermissionManager
+from .bot_level_mapping import format_furnace_level, parse_state
+from .alliance_member_edit import parse_edit_line
 from .pimp_my_bot import theme, safe_edit_message
 from .alliance import check_alliance_kingdom
 from .gift_state_resolver import verify_add_state, is_multistate
 
 logger = logging.getLogger('alliance')
+
+
+def parse_id_post(content):
+    """`fid` or `fid kingdom`, or the comma form `fid, name, level, kingdom`.
+    Commas keep a numeric name from being read as a kingdom. Returns
+    (fid, name, level, kingdom) with None for anything omitted, or None if unusable."""
+    text = (content or "").strip()
+    if "," in text:
+        parsed = parse_edit_line(text)
+        if isinstance(parsed, str):
+            return None
+        fid, name, level, kingdom = parsed
+        return int(fid), name, level, kingdom
+
+    parts = text.split()
+    if not (1 <= len(parts) <= 2) or not all(p.isdigit() for p in parts):
+        return None
+    kingdom = None
+    if len(parts) == 2:
+        kingdom = parse_state(parts[1])
+        if kingdom is None:
+            return None
+    return int(parts[0]), None, None, kingdom
 
 class AllianceIDChannel(commands.Cog):
     BACKOFF_DURATION = 300  # 5 minutes between invalid format warnings per channel
@@ -142,7 +167,8 @@ class AllianceIDChannel(commands.Cog):
 
         self.invalid_format_warnings[channel_id] = now
         await self._safe_react_reply(
-            message, theme.deniedIcon, "Please enter a valid numeric ID.",
+            message, theme.deniedIcon,
+            "Please post an ID like `12345678`, or `12345678, Name, TC 10, 1234` to include details.",
             delete_after=settings['delete_after'],
         )
 
@@ -205,12 +231,13 @@ class AllianceIDChannel(commands.Cog):
                     if already_processed:
                         continue
 
-                    content = message.content.strip()
-                    if not content.isdigit():
+                    parsed = parse_id_post(message.content)
+                    if parsed is None:
                         continue
 
-                    fid = int(content)
-                    await self.process_fid(message, fid, alliance_id)
+                    fid, given_name, given_level, given_kingdom = parsed
+                    await self.process_fid(message, fid, alliance_id, given_kingdom,
+                                           given_name=given_name, given_level=given_level)
 
             if invalid_channels:
                 with sqlite3.connect('db/id_channel.sqlite') as db:
@@ -244,21 +271,21 @@ class AllianceIDChannel(commands.Cog):
                 return
 
             alliance_id = channel_info[0]
-            parts = message.content.strip().split()
-
-            if not (1 <= len(parts) <= 2) or not all(p.isdigit() for p in parts):
+            parsed = parse_id_post(message.content)
+            if parsed is None:
                 await self.warn_invalid_format(message)
                 return
 
-            fid = int(parts[0])
-            given_kingdom = int(parts[1]) if len(parts) == 2 else None
-            await self.process_fid(message, fid, alliance_id, given_kingdom)
+            fid, given_name, given_level, given_kingdom = parsed
+            await self.process_fid(message, fid, alliance_id, given_kingdom,
+                                   given_name=given_name, given_level=given_level)
 
         except Exception as e:
             logger.error(f"Error in on_message: {e}")
             print(f"Error in on_message: {e}")
 
-    async def process_fid(self, message, fid, alliance_id, given_kingdom=None):
+    async def process_fid(self, message, fid, alliance_id, given_kingdom=None,
+                          given_name=None, given_level=None):
         settings = self.get_guild_settings(message.guild.id)
         delete_after = settings['delete_after']
 
@@ -326,7 +353,8 @@ class AllianceIDChannel(commands.Cog):
                 await message.reply(f"{theme.deniedIcon} {kingdom_error}", delete_after=delete_after)
                 return
 
-            nickname = f"Player {fid}"
+            nickname = given_name or f"Player {fid}"
+            furnace_lv = given_level or 0
             try:
                 with sqlite3.connect('db/users.sqlite') as users_db:
                     cursor = users_db.cursor()
@@ -338,8 +366,8 @@ class AllianceIDChannel(commands.Cog):
 
                     cursor.execute("""
                         INSERT INTO users (fid, nickname, furnace_lv, kid, stove_lv_content, alliance)
-                        VALUES (?, ?, 0, ?, NULL, ?)
-                    """, (fid, nickname, kid, alliance_id))
+                        VALUES (?, ?, ?, ?, NULL, ?)
+                    """, (fid, nickname, furnace_lv, kid, alliance_id))
                     users_db.commit()
             except sqlite3.IntegrityError:
                 await message.add_reaction(theme.warnIcon)
@@ -352,7 +380,9 @@ class AllianceIDChannel(commands.Cog):
                 description=(
                     f"{theme.upperDivider}\n"
                     f"**{theme.fidIcon} ID:** `{fid}`\n"
-                    f"**{theme.globeIcon} Kingdom:** `{kid if kid is not None else 'pending resolution'}`\n"
+                    f"**{theme.userIcon} Name:** `{nickname}`\n"
+                    + (f"**{theme.levelIcon} Level:** `{format_furnace_level(furnace_lv)}`\n" if furnace_lv else "")
+                    + f"**{theme.globeIcon} Kingdom:** `{kid if kid is not None else 'pending resolution'}`\n"
                     f"{theme.lowerDivider}"
                 ),
                 color=theme.emColor3
@@ -402,13 +432,14 @@ class AllianceIDChannel(commands.Cog):
                     if already_processed:
                         continue
 
-                    content = message.content.strip()
-                    if not content.isdigit():
+                    parsed = parse_id_post(message.content)
+                    if parsed is None:
                         await self.warn_invalid_format(message)
                         continue
 
-                    fid = int(content)
-                    await self.process_fid(message, fid, alliance_id)
+                    fid, given_name, given_level, given_kingdom = parsed
+                    await self.process_fid(message, fid, alliance_id, given_kingdom,
+                                           given_name=given_name, given_level=given_level)
 
         except Exception as e:
             if '503' in str(e) or '502' in str(e) or 'connect error' in str(e).lower():

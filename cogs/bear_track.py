@@ -7,6 +7,7 @@ from discord import app_commands
 import asyncio
 import aiohttp
 import gc
+import importlib.util
 import io
 import re
 import os
@@ -123,6 +124,10 @@ def invalidate_remote_ocr_cache():
 if PIL_AVAILABLE:
     try:
         from rapidocr import RapidOCR, LangRec
+        # rapidocr doesn't declare onnxruntime as a dep and only imports it when an
+        # engine is built, so check now rather than failing on the first screenshot.
+        if importlib.util.find_spec("onnxruntime") is None:
+            raise ImportError("onnxruntime is not installed (RapidOCR's inference backend)")
         try:
             from rapidocr.utils.download_file import DownloadFile
             DownloadFile.check_is_atty = staticmethod(lambda: False)

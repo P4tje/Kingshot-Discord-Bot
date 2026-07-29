@@ -545,16 +545,23 @@ def check_and_install_requirements():
 
     if missing_packages: # Install missing packages
         startup.phase_start("Installing missing packages")
+        # OCR-only and heavy: the bot runs fine without them (OCR just switches off),
+        # so a low-memory host that can't build them should still boot.
+        OPTIONAL_PACKAGES = {"onnxruntime", "rapidocr"}
 
         for package in missing_packages:
             package_name = package.split("==")[0].split(">=")[0].split("<=")[0].split("~=")[0].split("!=")[0]
 
             # Handle onnxruntime specially based on Python version
             if package_name.lower() == "onnxruntime":
-                if sys.version_info >= (3, 14):
-                    install_onnxruntime_nightly()
-                else:
-                    install_onnxruntime_stable(package)
+                try:
+                    if sys.version_info >= (3, 14):
+                        install_onnxruntime_nightly()
+                    else:
+                        install_onnxruntime_stable(package)
+                except Exception as e:
+                    startup.warn(f"Could not install onnxruntime ({e}) - screenshot reading "
+                                 f"(OCR) will be off. Everything else works.")
                 continue
 
             try:
@@ -569,12 +576,20 @@ def check_and_install_requirements():
                                         stderr=subprocess.STDOUT, text=True, env=_pip_env())
                 if result.returncode != 0:
                     tail = (result.stdout or "").strip().splitlines()[-15:]
+                    if package_name.lower() in OPTIONAL_PACKAGES:
+                        startup.warn(f"Could not install {package_name} - screenshot reading (OCR) "
+                                     f"will be off. Everything else works. "
+                                     f"Set an External OCR Service under Bear Tracking to re-enable it.")
+                        continue
                     startup.phase_fail("Dependencies failed",
                                        details=[f"Failed to install {package} (pip exit {result.returncode}):", *tail],
                                        fix="pip install -r requirements.txt")
                     return False
 
             except Exception as e:
+                if package_name.lower() in OPTIONAL_PACKAGES:
+                    startup.warn(f"Could not install {package_name} ({e}) - screenshot reading (OCR) will be off.")
+                    continue
                 startup.phase_fail("Dependencies failed", details=[f"Failed to install {package}: {e}"], fix="pip install -r requirements.txt")
                 return False
 
