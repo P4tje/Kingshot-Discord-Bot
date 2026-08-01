@@ -1009,15 +1009,15 @@ if __name__ == "__main__":
                                 src_path = os.path.join(root, file)
                                 rel_path = os.path.relpath(src_path, update_dir)
                                 dst_path = os.path.join(".", rel_path)
-                                
+                                norm_path = dst_path.replace("\\", "/")
+
                                 # Skip certain files that shouldn't be overwritten
-                                if file in ["bot_token.txt", "version"] or dst_path.startswith("db/") or dst_path.startswith("db\\"):
+                                if file in ["bot_token.txt", "version"] or norm_path.startswith("db/") or norm_path.startswith("./db/"):
                                     continue
-                                
+
                                 os.makedirs(os.path.dirname(dst_path), exist_ok=True)
 
                                 # Only backup cogs Python files (.py extension)
-                                norm_path = dst_path.replace("\\", "/")
                                 is_cogs_file = (norm_path.startswith("cogs/") or norm_path.startswith("./cogs/")) and file.endswith(".py")
                                 
                                 if is_cogs_file and os.path.exists(dst_path):
