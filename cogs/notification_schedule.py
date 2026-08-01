@@ -635,7 +635,7 @@ class NotificationSchedule(commands.Cog):
 
                         for row in rows:
                             parts = row[0].split('|')
-                            notification_days.update(int(p) for p in parts)
+                            notification_days.update(int(p) for p in parts if p)
 
                         # Generate occurrences for each matching weekday
                         current_date = next_time.date()
