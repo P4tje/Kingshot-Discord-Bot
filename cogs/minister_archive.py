@@ -782,10 +782,6 @@ class MinisterArchive(commands.Cog):
     async def show_archive_appointments(self, interaction: discord.Interaction, archive_id: int, appointment_type: str):
         """Show detailed appointment list for a specific activity day in an archive"""
         try:
-            # Get alliance database connection
-            alliance_conn = sqlite3.connect('db/alliance.sqlite')
-            alliance_cursor = alliance_conn.cursor()
-
             # Get appointments for this archive and appointment type
             self.svs_cursor.execute("""
                 SELECT time, fid, nickname, alliance
@@ -811,14 +807,11 @@ class MinisterArchive(commands.Cog):
                 view.add_item(back_button)
 
                 await interaction.response.edit_message(embed=embed, view=view)
-                alliance_conn.close()
                 return
 
             # Create view with appointments
             view = ArchiveAppointmentsView(self.bot, self, archive_id, appointment_type, appointments)
             await self.update_appointments_embed(interaction, view)
-
-            alliance_conn.close()
 
         except Exception as e:
             logger.error(f"Error loading appointments: {e}")
