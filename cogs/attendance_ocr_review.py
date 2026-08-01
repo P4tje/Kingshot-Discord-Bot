@@ -599,7 +599,7 @@ class EventReviewView(discord.ui.View):
             return bits
 
         unmatched = sum(1 for r in self.all_rows if not r["fid"])
-        low_conf = sum(1 for r in self.all_rows if r["status"] == "review")
+        low_conf = sum(1 for r in self.all_rows if r["status"] in ("likely", "review"))
         absent_count = self._would_be_absent_count()
         if unmatched:
             bits.append(f"{unmatched} unmatched — use Edit a player row to assign")
@@ -1657,7 +1657,8 @@ class _EditRowModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         if not self.player_input.value.strip():
-            del self.bucket[self.local_idx]
+            if self.local_idx is not None and self.local_idx < len(self.bucket):
+                del self.bucket[self.local_idx]
             await self.view._save_edit(interaction)
             return
         value = _parse_value_input(self.value_input.value)
@@ -1669,10 +1670,12 @@ class _EditRowModal(discord.ui.Modal):
 
         fid, nickname, status, note = await _resolve_player_field(
             interaction, self.view, self.player_input.value)
-        # Update in place so the original OCR name (alias key) and _kind survive.
-        self.bucket[self.local_idx].update(
-            {"value": value, "fid": fid, "nickname": nickname, "status": status})
-        displaced = self.view._apply_fid_collision(self.bucket, self.local_idx, fid) if fid else []
+        displaced = []
+        if self.local_idx is not None and self.local_idx < len(self.bucket):
+            # Update in place so the original OCR name (alias key) and _kind survive.
+            self.bucket[self.local_idx].update(
+                {"value": value, "fid": fid, "nickname": nickname, "status": status})
+            displaced = self.view._apply_fid_collision(self.bucket, self.local_idx, fid) if fid else []
         await self.view._save_edit(interaction)
         messages = []
         if note and self.player_input.value.strip() != self._orig_player:
