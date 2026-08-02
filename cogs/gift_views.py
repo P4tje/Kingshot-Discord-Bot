@@ -4,6 +4,7 @@ import discord
 import sqlite3
 import asyncio
 import logging
+from contextlib import closing
 from datetime import datetime
 
 from .pimp_my_bot import theme, check_interaction_user
@@ -127,17 +128,15 @@ async def list_gift_codes(cog, interaction: discord.Interaction):
 
 async def delete_gift_code(cog, interaction: discord.Interaction):
     try:
-        settings_conn = sqlite3.connect('db/settings.sqlite')
-        settings_cursor = settings_conn.cursor()
+        with closing(sqlite3.connect('db/settings.sqlite')) as settings_conn:
+            settings_cursor = settings_conn.cursor()
 
-        settings_cursor.execute("""
-            SELECT 1 FROM admin
-            WHERE id = ? AND is_initial = 1
-        """, (interaction.user.id,))
+            settings_cursor.execute("""
+                SELECT 1 FROM admin
+                WHERE id = ? AND is_initial = 1
+            """, (interaction.user.id,))
 
-        is_admin = settings_cursor.fetchone()
-        settings_cursor.close()
-        settings_conn.close()
+            is_admin = settings_cursor.fetchone()
 
         if not is_admin:
             await interaction.response.send_message(

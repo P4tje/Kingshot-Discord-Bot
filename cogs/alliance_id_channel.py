@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 import sqlite3
 import logging
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import os
 import asyncio
@@ -42,6 +43,91 @@ def parse_id_post(content):
             return None
     return int(parts[0]), None, None, kingdom
 
+
+# Changing this orphans info messages already pinned by older versions.
+INFO_MSG_HEADING = "Post your in-game ID here"
+
+
+def id_format_examples(multistate):
+    """(plain, detailed) post examples - one source so every hint stays in step."""
+    if multistate:
+        return "`12345678 245`", "`12345678, Name, TC 10, 245`"
+    return "`12345678`", "`12345678, Name, TC 10`"
+
+
+def render_info_message(alliance_id, alliance_name):
+    """The standing message posted in an alliance's ID channel."""
+    multistate = is_multistate(alliance_id)
+    plain, detailed = id_format_examples(multistate)
+    lines = [
+        f"{theme.fidIcon} **{INFO_MSG_HEADING}**",
+        f"Post your ID in this channel to join **{alliance_name}**. "
+        f"The bot checks it and adds you.",
+    ]
+    if multistate:
+        lines.append(
+            f"{theme.globeIcon} This alliance has members in several kingdoms, so post your ID "
+            f"**and** your kingdom together: {plain}"
+        )
+    else:
+        lines.append(f"{theme.fidIcon} Just your ID on its own: {plain}")
+    lines.append(f"{theme.userIcon} To fill in your name and level too: {detailed}")
+    return "\n".join(lines)
+
+
+def info_settings(alliance_id):
+    """(post, pin) for an alliance's ID channel info message."""
+    with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
+        row = conn.execute(
+            "SELECT COALESCE(id_post_info_message, 0), COALESCE(id_pin_info_message, 1) "
+            "FROM alliancesettings WHERE alliance_id = ?", (alliance_id,)).fetchone()
+    return (bool(row[0]), bool(row[1])) if row else (False, True)
+
+
+def set_info_settings(alliance_id, *, post=None, pin=None):
+    with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO alliancesettings (alliance_id, channel_id, interval) "
+            "VALUES (?, NULL, 0)", (alliance_id,))
+        if post is not None:
+            conn.execute("UPDATE alliancesettings SET id_post_info_message = ? WHERE alliance_id = ?",
+                         (int(post), alliance_id))
+        if pin is not None:
+            conn.execute("UPDATE alliancesettings SET id_pin_info_message = ? WHERE alliance_id = ?",
+                         (int(pin), alliance_id))
+        conn.commit()
+
+
+def channel_row_for_alliance(guild_id, alliance_id):
+    """(channel_id, info_message_id) for an alliance's ID channel, or None."""
+    with sqlite3.connect('db/id_channel.sqlite', timeout=30.0) as conn:
+        return conn.execute(
+            "SELECT channel_id, info_message_id FROM id_channels "
+            "WHERE guild_id = ? AND alliance_id = ?", (guild_id, alliance_id)).fetchone()
+
+
+def channel_rows_for_guild(guild_id):
+    """[(channel_id, alliance_id, info_message_id), ...] for every ID channel in a guild."""
+    with sqlite3.connect('db/id_channel.sqlite', timeout=30.0) as conn:
+        return conn.execute(
+            "SELECT channel_id, alliance_id, info_message_id FROM id_channels "
+            "WHERE guild_id = ?", (guild_id,)).fetchall()
+
+
+def all_channel_rows():
+    """[(channel_id, alliance_id, info_message_id), ...] across every guild."""
+    with sqlite3.connect('db/id_channel.sqlite', timeout=30.0) as conn:
+        return conn.execute(
+            "SELECT channel_id, alliance_id, info_message_id FROM id_channels").fetchall()
+
+
+def set_info_message_id(channel_id, message_id):
+    with sqlite3.connect('db/id_channel.sqlite', timeout=30.0) as conn:
+        conn.execute("UPDATE id_channels SET info_message_id = ? WHERE channel_id = ?",
+                     (message_id, channel_id))
+        conn.commit()
+
+
 class AllianceIDChannel(commands.Cog):
     BACKOFF_DURATION = 300  # 5 minutes between invalid format warnings per channel
 
@@ -76,38 +162,37 @@ class AllianceIDChannel(commands.Cog):
         if not os.path.exists('db'):
             os.makedirs('db')
 
-        conn = sqlite3.connect('db/id_channel.sqlite')
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS id_channels
-                     (guild_id INTEGER,
-                      alliance_id INTEGER,
-                      channel_id INTEGER,
-                      created_at TEXT,
-                      created_by INTEGER,
-                      UNIQUE(guild_id, channel_id))''')
+        with closing(sqlite3.connect('db/id_channel.sqlite')) as conn:
+            c = conn.cursor()
+            c.execute('''CREATE TABLE IF NOT EXISTS id_channels
+                         (guild_id INTEGER,
+                          alliance_id INTEGER,
+                          channel_id INTEGER,
+                          created_at TEXT,
+                          created_by INTEGER,
+                          UNIQUE(guild_id, channel_id))''')
 
-        c.execute('''CREATE TABLE IF NOT EXISTS id_channel_settings (
-                     guild_id INTEGER PRIMARY KEY,
-                     scan_enabled INTEGER DEFAULT 1,
-                     scan_limit INTEGER DEFAULT 50,
-                     delete_after INTEGER DEFAULT 10,
-                     respond_to_invalid INTEGER DEFAULT 0
-                 )''')
+            c.execute('''CREATE TABLE IF NOT EXISTS id_channel_settings (
+                         guild_id INTEGER PRIMARY KEY,
+                         scan_enabled INTEGER DEFAULT 1,
+                         scan_limit INTEGER DEFAULT 50,
+                         delete_after INTEGER DEFAULT 10,
+                         respond_to_invalid INTEGER DEFAULT 0
+                     )''')
 
-        # Migrate older installs: add columns introduced after the table existed.
-        c.execute("PRAGMA table_info(id_channel_settings)")
-        existing_cols = {row[1] for row in c.fetchall()}
-        if "delete_after" not in existing_cols:
-            c.execute("ALTER TABLE id_channel_settings ADD COLUMN delete_after INTEGER DEFAULT 10")
-        if "scan_limit" not in existing_cols:
-            c.execute("ALTER TABLE id_channel_settings ADD COLUMN scan_limit INTEGER DEFAULT 50")
-        if "scan_enabled" not in existing_cols:
-            c.execute("ALTER TABLE id_channel_settings ADD COLUMN scan_enabled INTEGER DEFAULT 1")
-        if "respond_to_invalid" not in existing_cols:
-            c.execute("ALTER TABLE id_channel_settings ADD COLUMN respond_to_invalid INTEGER DEFAULT 0")
+            # Migrate older installs: add columns introduced after the table existed.
+            c.execute("PRAGMA table_info(id_channel_settings)")
+            existing_cols = {row[1] for row in c.fetchall()}
+            if "delete_after" not in existing_cols:
+                c.execute("ALTER TABLE id_channel_settings ADD COLUMN delete_after INTEGER DEFAULT 10")
+            if "scan_limit" not in existing_cols:
+                c.execute("ALTER TABLE id_channel_settings ADD COLUMN scan_limit INTEGER DEFAULT 50")
+            if "scan_enabled" not in existing_cols:
+                c.execute("ALTER TABLE id_channel_settings ADD COLUMN scan_enabled INTEGER DEFAULT 1")
+            if "respond_to_invalid" not in existing_cols:
+                c.execute("ALTER TABLE id_channel_settings ADD COLUMN respond_to_invalid INTEGER DEFAULT 0")
 
-        conn.commit()
-        conn.close()
+            conn.commit()
 
     def get_guild_settings(self, guild_id):
         defaults = {
@@ -150,6 +235,116 @@ class AllianceIDChannel(commands.Cog):
             except discord.HTTPException:
                 pass
 
+
+    def _looks_like_info_message(self, msg):
+        """True if this is a bot-authored ID channel info message."""
+        if self.bot.user is None or msg.author.id != self.bot.user.id:
+            return False
+        return INFO_MSG_HEADING in (msg.content or "")
+
+    async def _find_info_messages(self, channel, tracked_id=None):
+        """Bot-authored info messages in the channel - pins are bounded to <=50."""
+        try:
+            pins = await channel.pins()
+        except (discord.Forbidden, discord.HTTPException):
+            pins = []
+        found = [m for m in pins if self._looks_like_info_message(m)]
+        if tracked_id and not any(m.id == tracked_id for m in found):
+            # Stored message may exist but be unpinned.
+            try:
+                msg = await channel.fetch_message(tracked_id)
+                if self._looks_like_info_message(msg):
+                    found.append(msg)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+        return found
+
+    async def refresh_info_message(self, channel_id, alliance_id, tracked_id=None):
+        """Post, edit, pin or remove an alliance's standing info message to match its settings."""
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            return
+        post, pin = await asyncio.to_thread(info_settings, alliance_id)
+        found = await self._find_info_messages(channel, tracked_id)
+
+        if not post:
+            for m in found:
+                try:
+                    await m.delete()
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
+            if tracked_id:
+                await asyncio.to_thread(set_info_message_id, channel_id, None)
+            return
+
+        alliance_name = await asyncio.to_thread(self._alliance_name, alliance_id)
+        content = await asyncio.to_thread(render_info_message, alliance_id, alliance_name)
+
+        keep = next((m for m in found if m.id == tracked_id), None)
+        if keep is None and found:
+            keep = max(found, key=lambda m: m.created_at)
+        for m in found:
+            if keep is None or m.id != keep.id:
+                try:
+                    await m.delete()
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
+
+        if keep is None:
+            try:
+                keep = await channel.send(content)
+            except (discord.Forbidden, discord.HTTPException):
+                logger.warning(f"ID channel: cannot post info message in channel {channel_id}")
+                return
+            await asyncio.to_thread(set_info_message_id, channel_id, keep.id)
+        else:
+            if (keep.content or "") != content:
+                try:
+                    await keep.edit(content=content)
+                except (discord.Forbidden, discord.HTTPException):
+                    return
+            if keep.id != tracked_id:
+                await asyncio.to_thread(set_info_message_id, channel_id, keep.id)
+
+        try:
+            if pin and not keep.pinned:
+                await keep.pin(reason="ID channel info message")
+            elif not pin and keep.pinned:
+                await keep.unpin(reason="ID channel info message pin turned off")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def remove_info_message(self, channel_id, tracked_id=None):
+        """Delete the info message - call before dropping an id_channels row."""
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            return
+        for m in await self._find_info_messages(channel, tracked_id):
+            try:
+                await m.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+    async def refresh_alliance_info_message(self, guild_id, alliance_id):
+        """Refresh one alliance's info message, if it has an ID channel here."""
+        row = await asyncio.to_thread(channel_row_for_alliance, guild_id, alliance_id)
+        if row:
+            await self.refresh_info_message(row[0], alliance_id, row[1])
+
+    async def reconcile_info_messages(self):
+        """Bring every ID channel's info message in line with its alliance settings."""
+        for channel_id, alliance_id, tracked_id in await asyncio.to_thread(all_channel_rows):
+            try:
+                await self.refresh_info_message(channel_id, alliance_id, tracked_id)
+            except Exception as e:
+                logger.error(f"ID channel info refresh failed for {channel_id}: {e}")
+
+    def _alliance_name(self, alliance_id):
+        with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
+            row = conn.execute("SELECT name FROM alliance_list WHERE alliance_id = ?",
+                               (alliance_id,)).fetchone()
+        return row[0] if row else "this alliance"
+
     async def warn_invalid_format(self, message, alliance_id=None):
         # Default off: silently ignore non-numeric posts in ID channels unless
         # the admin has opted in. Avoids embarrassing X-emoji spam if a busy
@@ -166,12 +361,13 @@ class AllianceIDChannel(commands.Cog):
             return
 
         self.invalid_format_warnings[channel_id] = now
-        if alliance_id is not None and await asyncio.to_thread(is_multistate, alliance_id):
-            hint = ("Please post your ID and kingdom like `12345678 245`, "
-                    "or `12345678, Name, TC 10, 245` to include details.")
+        multistate = (alliance_id is not None
+                      and await asyncio.to_thread(is_multistate, alliance_id))
+        plain, detailed = id_format_examples(multistate)
+        if multistate:
+            hint = f"Please post your ID and kingdom like {plain}, or {detailed} to include details."
         else:
-            hint = ("Please post an ID like `12345678`, "
-                    "or `12345678, Name, TC 10` to include details.")
+            hint = f"Please post an ID like {plain}, or {detailed} to include details."
         await self._safe_react_reply(
             message, theme.deniedIcon, hint,
             delete_after=settings['delete_after'],
@@ -243,6 +439,8 @@ class AllianceIDChannel(commands.Cog):
                     fid, given_name, given_level, given_kingdom = parsed
                     await self.process_fid(message, fid, alliance_id, given_kingdom,
                                            given_name=given_name, given_level=given_level)
+
+            await self.reconcile_info_messages()
 
             if invalid_channels:
                 with sqlite3.connect('db/id_channel.sqlite') as db:
@@ -495,17 +693,27 @@ class AllianceIDChannel(commands.Cog):
             else:
                 state_line = f"{theme.deniedIcon} No ID channel configured for this alliance."
 
-            if await asyncio.to_thread(is_multistate, alliance_id):
+            post_info, pin_info = await asyncio.to_thread(info_settings, alliance_id)
+            multistate = await asyncio.to_thread(is_multistate, alliance_id)
+            plain, detailed = id_format_examples(multistate)
+            if multistate:
                 format_lines = (
                     f"This alliance spans several kingdoms, so members post their ID **and** "
-                    f"kingdom together: `12345678 245`.\n"
-                    f"To fill in their details too: `12345678, Name, TC 10, 245`.\n"
+                    f"kingdom together: {plain}.\n"
+                    f"To fill in their details too: {detailed}.\n"
                 )
             else:
                 format_lines = (
-                    f"Members post just their ID: `12345678`.\n"
-                    f"To fill in their details too: `12345678, Name, TC 10`.\n"
+                    f"Members post just their ID: {plain}.\n"
+                    f"To fill in their details too: {detailed}.\n"
                 )
+
+            if not post_info:
+                info_line = f"{theme.deniedIcon} Info message: off"
+            elif pin_info:
+                info_line = f"{theme.verifiedIcon} Info message: posted and pinned"
+            else:
+                info_line = f"{theme.verifiedIcon} Info message: posted (not pinned)"
 
             embed = discord.Embed(
                 title=f"{theme.fidIcon} {alliance_name} — ID Channel",
@@ -515,11 +723,13 @@ class AllianceIDChannel(commands.Cog):
                     f"{format_lines}"
                     f"{theme.upperDivider}\n"
                     f"{state_line}\n"
+                    f"{info_line}\n"
                     f"{theme.lowerDivider}"
                 ),
                 color=theme.emColor1,
             )
-            view = AllianceIDChannelView(self, alliance_id, alliance_name, bool(current_channel_id))
+            view = AllianceIDChannelView(self, alliance_id, alliance_name,
+                                         bool(current_channel_id), post_info, pin_info)
             await safe_edit_message(interaction, embed=embed, view=view, content=None)
 
         except Exception as e:
@@ -724,12 +934,15 @@ class IDChannelSettingsView(discord.ui.View):
 class AllianceIDChannelView(discord.ui.View):
     """Per-alliance ID Channel management — alliance is already known."""
 
-    def __init__(self, cog, alliance_id: int, alliance_name: str, has_channel: bool):
+    def __init__(self, cog, alliance_id: int, alliance_name: str, has_channel: bool,
+                 post_info: bool = False, pin_info: bool = True):
         super().__init__(timeout=7200)
         self.cog = cog
         self.alliance_id = alliance_id
         self.alliance_name = alliance_name
         self.has_channel = has_channel
+        self.post_info = post_info
+        self.pin_info = pin_info
 
         set_btn = discord.ui.Button(
             label="Change Channel" if has_channel else "Set Channel",
@@ -750,14 +963,48 @@ class AllianceIDChannelView(discord.ui.View):
             remove_btn.callback = self._on_remove
             self.add_item(remove_btn)
 
+        if has_channel:
+            info_btn = discord.ui.Button(
+                label=f"Info Message: {'On' if post_info else 'Off'}",
+                emoji=f"{theme.announceIcon}",
+                style=(discord.ButtonStyle.success if post_info
+                       else discord.ButtonStyle.secondary),
+                row=1,
+            )
+            info_btn.callback = self._on_toggle_info
+            self.add_item(info_btn)
+
+            pin_btn = discord.ui.Button(
+                label=f"Pin Message: {'On' if pin_info else 'Off'}",
+                emoji=f"{theme.pinIcon}",
+                style=(discord.ButtonStyle.success if pin_info
+                       else discord.ButtonStyle.secondary),
+                row=1,
+                disabled=not post_info,
+            )
+            pin_btn.callback = self._on_toggle_pin
+            self.add_item(pin_btn)
+
         back_btn = discord.ui.Button(
             label="Back to Hub",
             emoji=f"{theme.backIcon}",
             style=discord.ButtonStyle.secondary,
-            row=1,
+            row=2,
         )
         back_btn.callback = self._on_back
         self.add_item(back_btn)
+
+    async def _on_toggle_info(self, interaction: discord.Interaction):
+        await self._apply_info_setting(interaction, post=not self.post_info)
+
+    async def _on_toggle_pin(self, interaction: discord.Interaction):
+        await self._apply_info_setting(interaction, pin=not self.pin_info)
+
+    async def _apply_info_setting(self, interaction: discord.Interaction, **change):
+        await interaction.response.defer()
+        await asyncio.to_thread(set_info_settings, self.alliance_id, **change)
+        await self.cog.refresh_alliance_info_message(interaction.guild_id, self.alliance_id)
+        await self.cog.show_id_channel_for(interaction, self.alliance_id)
 
     async def _on_set(self, interaction: discord.Interaction):
         cog = self.cog
@@ -811,6 +1058,7 @@ class AllianceIDChannelView(discord.ui.View):
                         ephemeral=True,
                     )
                     return
+                await cog.refresh_alliance_info_message(channel_interaction.guild_id, alliance_id)
                 await cog.show_id_channel_for(channel_interaction, alliance_id)
 
         select_view = discord.ui.View(timeout=300)
@@ -824,6 +1072,11 @@ class AllianceIDChannelView(discord.ui.View):
 
     async def _on_remove(self, interaction: discord.Interaction):
         try:
+            # Drop the info message first - once the row is gone we can't find it.
+            row = await asyncio.to_thread(
+                channel_row_for_alliance, interaction.guild_id, self.alliance_id)
+            if row:
+                await self.cog.remove_info_message(row[0], row[1])
             with sqlite3.connect('db/id_channel.sqlite') as db:
                 cursor = db.cursor()
                 cursor.execute(

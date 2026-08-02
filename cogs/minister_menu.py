@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 import sqlite3
 import logging
+from contextlib import closing
 from .permission_handler import PermissionManager
 from .pimp_my_bot import theme, safe_edit_message
 from .alliance_member_edit import apply_member_edit
@@ -482,11 +483,10 @@ class MinisterSettingsView(discord.ui.View):
             return
         
         try:
-            svs_conn = sqlite3.connect("db/svs.sqlite")
-            svs_cursor = svs_conn.cursor()
-            svs_cursor.execute("DELETE FROM reference WHERE context=?", ("minister guild id",))
-            svs_conn.commit()
-            svs_conn.close()
+            with closing(sqlite3.connect("db/svs.sqlite")) as svs_conn:
+                svs_cursor = svs_conn.cursor()
+                svs_cursor.execute("DELETE FROM reference WHERE context=?", ("minister guild id",))
+                svs_conn.commit()
             await interaction.response.send_message(f"{theme.verifiedIcon} Server ID deleted from the database.", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"{theme.deniedIcon} Failed to delete server ID: {e}", ephemeral=True)
@@ -836,17 +836,14 @@ class MinisterMenu(commands.Cog):
             pass
 
     async def is_admin(self, user_id: int) -> bool:
-        settings_conn = sqlite3.connect('db/settings.sqlite')
-        settings_cursor = settings_conn.cursor()
-        
-        if user_id == self.bot.owner_id:
-            settings_conn.close()
-            return True
-        
-        settings_cursor.execute("SELECT 1 FROM admin WHERE id=?", (user_id,))
-        result = settings_cursor.fetchone() is not None
-        settings_conn.close()
-        return result
+        with closing(sqlite3.connect('db/settings.sqlite')) as settings_conn:
+            settings_cursor = settings_conn.cursor()
+
+            if user_id == self.bot.owner_id:
+                return True
+
+            settings_cursor.execute("SELECT 1 FROM admin WHERE id=?", (user_id,))
+            return settings_cursor.fetchone() is not None
 
     async def show_minister_channel_menu(self, interaction: discord.Interaction):
         # Store the original interaction for later updates
@@ -1447,30 +1444,29 @@ class MinisterMenu(commands.Cog):
                     await interaction.response.defer()
                     
                     cleared_channels = []
-                    svs_conn = sqlite3.connect("db/svs.sqlite")
-                    svs_cursor = svs_conn.cursor()
-                    
-                    for value in select.values:
-                        if value == "ALL":
-                            # Clear all minister channels
-                            for activity in ["Construction Day", "Research Day", "Troops Training Day"]:
-                                await self._clear_channel_config(svs_cursor, activity, interaction.guild)
-                                cleared_channels.append(f"{activity} channel")
-                            
-                            # Clear log channel
-                            svs_cursor.execute("DELETE FROM reference WHERE context=?", ("minister log channel",))
-                            cleared_channels.append("Log channel")
-                        else:
-                            if value == "minister log":
+                    with closing(sqlite3.connect("db/svs.sqlite")) as svs_conn:
+                        svs_cursor = svs_conn.cursor()
+
+                        for value in select.values:
+                            if value == "ALL":
+                                # Clear all minister channels
+                                for activity in ["Construction Day", "Research Day", "Troops Training Day"]:
+                                    await self._clear_channel_config(svs_cursor, activity, interaction.guild)
+                                    cleared_channels.append(f"{activity} channel")
+
+                                # Clear log channel
                                 svs_cursor.execute("DELETE FROM reference WHERE context=?", ("minister log channel",))
                                 cleared_channels.append("Log channel")
                             else:
-                                await self._clear_channel_config(svs_cursor, value, interaction.guild)
-                                cleared_channels.append(f"{value} channel")
-                    
-                    svs_conn.commit()
-                    svs_conn.close()
-                    
+                                if value == "minister log":
+                                    svs_cursor.execute("DELETE FROM reference WHERE context=?", ("minister log channel",))
+                                    cleared_channels.append("Log channel")
+                                else:
+                                    await self._clear_channel_config(svs_cursor, value, interaction.guild)
+                                    cleared_channels.append(f"{value} channel")
+
+                        svs_conn.commit()
+
                     # Show success message
                     success_message = "Successfully cleared the following configurations:\n" + "\n".join([f"• {ch}" for ch in cleared_channels])
                     
