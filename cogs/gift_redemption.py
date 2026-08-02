@@ -816,8 +816,8 @@ def set_summary_settings(cog, alliance_id, *, enabled=None, success=None, alread
     cog.settings_conn.commit()
 
 
-def _summary_names_block(names, limit=1024) -> str:
-    """One name per line, truncated to fit `limit` chars, with an overflow pointer to Redemption History."""
+def _summary_names_block(names, limit=1024, overflow="see Redemption History") -> str:
+    """One name per line, truncated to fit `limit` chars, with an overflow pointer."""
     out, used = [], 0
     for n in names:
         need = len(n) + 2  # + newline + LRM
@@ -830,7 +830,7 @@ def _summary_names_block(names, limit=1024) -> str:
     text = "\n".join(out)
     more = len(names) - len(out)
     if more > 0:
-        text += f"\n…and {more} more - see Redemption History"
+        text += f"\n…and {more} more - {overflow}"
     return text
 
 
@@ -1415,7 +1415,8 @@ async def post_removal_summary(cog, removals):
             if channel is None:
                 continue
             listed = _summary_names_block(
-                [f"{_iso(nick)} (`{fid}`)" for fid, nick in members], 3800)
+                [f"{_iso(nick)} (`{fid}`)" for fid, nick in members], 3800,
+                overflow="see the bot log")
             embed = discord.Embed(
                 title=f"{theme.membersIcon} Member Auto-removed ({len(members)})",
                 description=(
