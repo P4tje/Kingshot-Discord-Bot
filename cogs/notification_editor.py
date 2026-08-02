@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 import sqlite3
 import logging
+from contextlib import closing
 from datetime import datetime
 import re
 from .notification_event_types import get_event_icon
@@ -69,14 +70,13 @@ def format_repeat_interval(repeat_minutes, notification_id=None) -> str:
         if notification_id is None:
             return "Custom Days"
 
-        conn = sqlite3.connect("db/beartime.sqlite")
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT weekday FROM notification_days
-            WHERE notification_id = ?
-        """, (notification_id,))
-        rows = cursor.fetchall()
-        conn.close()
+        with closing(sqlite3.connect("db/beartime.sqlite")) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT weekday FROM notification_days
+                WHERE notification_id = ?
+            """, (notification_id,))
+            rows = cursor.fetchall()
 
         weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         day_set = set()
@@ -379,13 +379,12 @@ class EmbedDataView(discord.ui.View):
     async def notification_setting(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
 
-        conn = sqlite3.connect("db/beartime.sqlite")
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT channel_id, hour, minute, description, mention_type, repeat_minutes, next_notification, timezone, notification_type FROM bear_notifications WHERE id = ?",
-            (self.notification_id,))
-        result = cursor.fetchone()
-        conn.close()
+        with closing(sqlite3.connect("db/beartime.sqlite")) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT channel_id, hour, minute, description, mention_type, repeat_minutes, next_notification, timezone, notification_type FROM bear_notifications WHERE id = ?",
+                (self.notification_id,))
+            result = cursor.fetchone()
 
         if not result:
             await interaction.followup.send(f"{theme.deniedIcon} Notification not found in database.", ephemeral=True)
@@ -448,13 +447,12 @@ class PlainEditorView(discord.ui.View):
 
         if self.repeat == -1:
             try:
-                conn = sqlite3.connect("db/beartime.sqlite")
-                cursor = conn.cursor()
-                cursor.execute("SELECT weekday FROM notification_days WHERE notification_id = ?", (self.notification_id,))
-                weekday_value = cursor.fetchone()
-                if weekday_value:
-                    self.weekdays = weekday_value[0]
-                conn.close()
+                with closing(sqlite3.connect("db/beartime.sqlite")) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT weekday FROM notification_days WHERE notification_id = ?", (self.notification_id,))
+                    weekday_value = cursor.fetchone()
+                    if weekday_value:
+                        self.weekdays = weekday_value[0]
             except Exception as e:
                 logger.error(f"Failed to load weekdays: {e}")
                 print(f"Failed to load weekdays: {e}")
@@ -938,12 +936,18 @@ class NotificationEditor(commands.Cog):
             )
             return
 
-        conn = sqlite3.connect("db/beartime.sqlite")
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT channel_id, hour, minute, description, mention_type, repeat_minutes, next_notification, timezone, notification_type, event_type FROM bear_notifications WHERE id = ?",
-            (notification_id,))
-        result = cursor.fetchone()
+        with closing(sqlite3.connect("db/beartime.sqlite")) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT channel_id, hour, minute, description, mention_type, repeat_minutes, next_notification, timezone, notification_type, event_type FROM bear_notifications WHERE id = ?",
+                (notification_id,))
+            result = cursor.fetchone()
+            embed_results = None
+            if result and "EMBED_MESSAGE" in result[3]:
+                cursor.execute(
+                    "SELECT title, description, color, image_url, thumbnail_url, footer, author, mention_message FROM bear_notification_embeds WHERE notification_id = ?",
+                    (notification_id,))
+                embed_results = cursor.fetchone()
 
         if not result:
             await interaction.response.send_message(f"{theme.deniedIcon} Notification ID not found.", ephemeral=True)
@@ -951,10 +955,6 @@ class NotificationEditor(commands.Cog):
 
         channel_id, hours, minutes, description, mention, repeat, next_notification, timezone, notification_type, event_type = result
         if "EMBED_MESSAGE" in description:
-            cursor.execute(
-                "SELECT title, description, color, image_url, thumbnail_url, footer, author, mention_message FROM bear_notification_embeds WHERE notification_id = ?",
-                (notification_id,))
-            embed_results = cursor.fetchone()
             title, embed_description, color, image_url, thumbnail_url, footer, author, mention_message = embed_results
 
             view = EmbedDataView(self, notification_id, title, embed_description, color, image_url, thumbnail_url,
@@ -1020,32 +1020,30 @@ class NotificationEditor(commands.Cog):
         view.message = message
 
     async def update_notification(self, view):
-        conn = sqlite3.connect("db/beartime.sqlite")
-        cursor = conn.cursor()
+        with closing(sqlite3.connect("db/beartime.sqlite")) as conn:
+            cursor = conn.cursor()
 
-        if view.repeat == -1:
-            cursor.execute("DELETE FROM notification_days WHERE notification_id = ?", (view.notification_id,))
+            if view.repeat == -1:
+                cursor.execute("DELETE FROM notification_days WHERE notification_id = ?", (view.notification_id,))
 
-            weekday = getattr(view, "weekdays", "")
-            cursor.execute("INSERT INTO notification_days (notification_id, weekday) VALUES (?, ?)",(view.notification_id, weekday))
-        else:
-            cursor.execute("DELETE FROM notification_days WHERE notification_id = ?", (view.notification_id,))
+                weekday = getattr(view, "weekdays", "")
+                cursor.execute("INSERT INTO notification_days (notification_id, weekday) VALUES (?, ?)",(view.notification_id, weekday))
+            else:
+                cursor.execute("DELETE FROM notification_days WHERE notification_id = ?", (view.notification_id,))
 
-        # Refresh the last-known channel name so quarantine DMs name the right channel.
-        channel_name = getattr(self.bot.get_channel(view.channel_id), "name", None)
-        cursor.execute(
-            "UPDATE bear_notifications SET channel_id = ?, channel_name = ?, hour = ?, minute = ?, description = ?, mention_type = ?, repeat_minutes = ?, next_notification = ?, notification_type = ? WHERE id = ?",
-            (view.channel_id, channel_name, view.hours, view.minutes, view.description, view.mention, view.repeat,
-             view.next_notification, view.notification_type, view.notification_id)
-        )
-        conn.commit()
+            # Refresh the last-known channel name so quarantine DMs name the right channel.
+            channel_name = getattr(self.bot.get_channel(view.channel_id), "name", None)
+            cursor.execute(
+                "UPDATE bear_notifications SET channel_id = ?, channel_name = ?, hour = ?, minute = ?, description = ?, mention_type = ?, repeat_minutes = ?, next_notification = ?, notification_type = ? WHERE id = ?",
+                (view.channel_id, channel_name, view.hours, view.minutes, view.description, view.mention, view.repeat,
+                 view.next_notification, view.notification_type, view.notification_id)
+            )
+            conn.commit()
 
-        # Get guild_id for schedule board update
-        cursor.execute("SELECT guild_id FROM bear_notifications WHERE id = ?", (view.notification_id,))
-        result = cursor.fetchone()
-        guild_id = result[0] if result else None
-
-        conn.close()
+            # Get guild_id for schedule board update
+            cursor.execute("SELECT guild_id FROM bear_notifications WHERE id = ?", (view.notification_id,))
+            result = cursor.fetchone()
+            guild_id = result[0] if result else None
 
         # Notify schedule boards of update
         if guild_id:
@@ -1054,21 +1052,19 @@ class NotificationEditor(commands.Cog):
                 await schedule_cog.on_notification_updated(guild_id, view.channel_id)
 
     async def update_embed_notification(self, view):
-        conn = sqlite3.connect("db/beartime.sqlite")
-        cursor = conn.cursor()
+        with closing(sqlite3.connect("db/beartime.sqlite")) as conn:
+            cursor = conn.cursor()
 
-        cursor.execute(
-            "UPDATE bear_notification_embeds SET title = ?, description = ?, color = ?, image_url = ?, thumbnail_url = ?, footer = ?, author = ?, mention_message = ? WHERE notification_id = ?",
-            (view.title, view.embed_description, view.color, view.image_url, view.thumbnail_url, view.footer,
-             view.author, view.mention_message, view.notification_id)
-        )
-        conn.commit()
+            cursor.execute(
+                "UPDATE bear_notification_embeds SET title = ?, description = ?, color = ?, image_url = ?, thumbnail_url = ?, footer = ?, author = ?, mention_message = ? WHERE notification_id = ?",
+                (view.title, view.embed_description, view.color, view.image_url, view.thumbnail_url, view.footer,
+                 view.author, view.mention_message, view.notification_id)
+            )
+            conn.commit()
 
-        # Get guild_id and channel_id for schedule board update
-        cursor.execute("SELECT guild_id, channel_id FROM bear_notifications WHERE id = ?", (view.notification_id,))
-        result = cursor.fetchone()
-
-        conn.close()
+            # Get guild_id and channel_id for schedule board update
+            cursor.execute("SELECT guild_id, channel_id FROM bear_notifications WHERE id = ?", (view.notification_id,))
+            result = cursor.fetchone()
 
         if result:
             guild_id, channel_id = result

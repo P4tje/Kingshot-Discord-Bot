@@ -15,6 +15,7 @@ import sqlite3
 import time
 import unicodedata
 import logging
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta, timezone
 from cogs.attendance import MATPLOTLIB_AVAILABLE
@@ -159,62 +160,61 @@ def _ensure_bear_hunts_event_time(conn):
 
 def init_bear_database():
     """Initialize bear_hunts + bear_player_damage tables."""
-    conn = sqlite3.connect(BEAR_DB_PATH, timeout=30.0)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS bear_hunts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            alliance_id INTEGER NOT NULL,
-            date TEXT NOT NULL,
-            hunting_trap INTEGER NOT NULL,
-            rallies INTEGER,
-            total_damage INTEGER,
-            UNIQUE (alliance_id, date, hunting_trap)
-        )
-    """)
-    _ensure_bear_hunts_event_time(conn)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS bear_player_damage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            hunt_id INTEGER NOT NULL REFERENCES bear_hunts(id) ON DELETE CASCADE,
-            fid INTEGER,
-            raw_name TEXT,
-            resolved_nickname TEXT,
-            damage INTEGER NOT NULL,
-            rank INTEGER,
-            match_score INTEGER
-        )
-    """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_bpd_fid ON bear_player_damage(fid)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_bpd_hunt ON bear_player_damage(hunt_id)")
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS bear_ocr_lang_stats (
-            alliance_id INTEGER NOT NULL,
-            lang        TEXT    NOT NULL,
-            role        TEXT    NOT NULL,
-            runs        INTEGER NOT NULL DEFAULT 0,
-            rows_filled INTEGER NOT NULL DEFAULT 0,
-            last_run_at TEXT,
-            PRIMARY KEY (alliance_id, lang, role)
-        )
-    """)
-    # Learned OCR→player aliases: maps the normalized OCR text of a name the
-    # bot can't read (decorated/homoglyph gamertags) to the player it belongs to,
-    # so an admin only has to resolve it once.
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS bear_name_alias (
-            alliance_id INTEGER NOT NULL,
-            ocr_key     TEXT    NOT NULL,
-            fid         INTEGER NOT NULL,
-            raw_name    TEXT,
-            updated_at  TEXT,
-            PRIMARY KEY (alliance_id, ocr_key)
-        )
-    """)
-    conn.commit()
-    conn.close()
+    with closing(sqlite3.connect(BEAR_DB_PATH, timeout=30.0)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bear_hunts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alliance_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                hunting_trap INTEGER NOT NULL,
+                rallies INTEGER,
+                total_damage INTEGER,
+                UNIQUE (alliance_id, date, hunting_trap)
+            )
+        """)
+        _ensure_bear_hunts_event_time(conn)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bear_player_damage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hunt_id INTEGER NOT NULL REFERENCES bear_hunts(id) ON DELETE CASCADE,
+                fid INTEGER,
+                raw_name TEXT,
+                resolved_nickname TEXT,
+                damage INTEGER NOT NULL,
+                rank INTEGER,
+                match_score INTEGER
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bpd_fid ON bear_player_damage(fid)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bpd_hunt ON bear_player_damage(hunt_id)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bear_ocr_lang_stats (
+                alliance_id INTEGER NOT NULL,
+                lang        TEXT    NOT NULL,
+                role        TEXT    NOT NULL,
+                runs        INTEGER NOT NULL DEFAULT 0,
+                rows_filled INTEGER NOT NULL DEFAULT 0,
+                last_run_at TEXT,
+                PRIMARY KEY (alliance_id, lang, role)
+            )
+        """)
+        # Learned OCR→player aliases: maps the normalized OCR text of a name the
+        # bot can't read (decorated/homoglyph gamertags) to the player it belongs to,
+        # so an admin only has to resolve it once.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bear_name_alias (
+                alliance_id INTEGER NOT NULL,
+                ocr_key     TEXT    NOT NULL,
+                fid         INTEGER NOT NULL,
+                raw_name    TEXT,
+                updated_at  TEXT,
+                PRIMARY KEY (alliance_id, ocr_key)
+            )
+        """)
+        conn.commit()
 
 
 init_bear_database()

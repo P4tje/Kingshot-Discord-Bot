@@ -4,6 +4,7 @@ from discord.ext import commands
 import sqlite3
 import asyncio
 import logging
+from contextlib import closing
 from datetime import datetime, timezone
 from .pimp_my_bot import theme
 from .alliance import check_alliance_kingdom
@@ -79,22 +80,19 @@ class AllianceRegistration(commands.Cog):
     def is_registration_enabled(self) -> bool:
         """Check if registration is enabled in the settings database."""
         try:
-            conn = sqlite3.connect("db/settings.sqlite")
-            cursor = conn.cursor()
+            with closing(sqlite3.connect("db/settings.sqlite")) as conn:
+                cursor = conn.cursor()
 
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='register_settings'")
-            table_exists = cursor.fetchone()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='register_settings'")
+                table_exists = cursor.fetchone()
 
-            if not table_exists:
-                conn.close()
-                return False
+                if not table_exists:
+                    return False
 
-            cursor.execute("SELECT enabled FROM register_settings WHERE rowid = 1")
-            result = cursor.fetchone()
+                cursor.execute("SELECT enabled FROM register_settings WHERE rowid = 1")
+                result = cursor.fetchone()
 
-            conn.close()
-
-            return bool(result[0]) if result else False
+                return bool(result[0]) if result else False
 
         except Exception as e:
             logger.error(f"Error checking registration status: {e}")

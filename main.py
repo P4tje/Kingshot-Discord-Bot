@@ -143,6 +143,66 @@ def _pip_env():
         pass  # fall back to the default temp dir
     return env
 
+
+# OCR-only: the bot boots fine without these (OCR just switches off) if they won't install.
+OPTIONAL_PACKAGES = {"onnxruntime", "rapidocr"}
+
+
+def _package_name(spec):
+    """Bare package name from a requirements.txt line/spec."""
+    for sep in ("==", ">=", "<=", "~=", "!="):
+        spec = spec.split(sep)[0]
+    return spec
+
+
+def _pip_install_one(package, *, retries=1):
+    """Install one requirement, retrying once for transient failures. Returns (ok, output_tail)."""
+    import time
+    cmd = [sys.executable, "-m", "pip", "install", package, "--no-cache-dir"]
+    if break_system_packages_arg():
+        cmd.append("--break-system-packages")
+    tail = []
+    for attempt in range(retries + 1):
+        if attempt:
+            time.sleep(3)  # give a transient lock a moment to clear before retrying
+        try:
+            result = subprocess.run(cmd, timeout=1200, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, env=_pip_env())
+            if result.returncode == 0:
+                return True, []
+            tail = (result.stdout or "").strip().splitlines()[-15:]
+        except Exception as e:
+            tail = [str(e)]
+    return False, tail
+
+
+def _install_requirements_individually(requirements_txt_path):
+    """Per-package fallback after a batch failure; optional OCR packages degrade to a warning. Returns False only on an essential package."""
+    try:
+        with open(requirements_txt_path, "r") as f:
+            packages = [ln.strip() for ln in f
+                        if ln.strip() and not ln.strip().startswith("#")]
+    except OSError as e:
+        startup.phase_fail("Update failed", details=[f"Could not read requirements: {e}"],
+                           fix="pip install -r requirements.txt")
+        return False
+
+    for package in packages:
+        ok, tail = _pip_install_one(package)
+        if ok:
+            continue
+        if _package_name(package).lower() in OPTIONAL_PACKAGES:
+            startup.warn(f"Could not install {_package_name(package)} - screenshot reading (OCR) "
+                         f"will be off. Everything else works. "
+                         f"Set an External OCR Service under Bear Tracking to re-enable it.")
+            continue
+        startup.phase_fail("Update failed",
+                           details=[f"Failed to install {package}:", *tail],
+                           fix="pip install -r requirements.txt")
+        return False
+    return True
+
+
 def should_skip_venv() -> bool:
     """Check if venv should be skipped"""
     
@@ -725,6 +785,39 @@ except ImportError:
 except Exception:
     pass  # SSL patch error, continue anyway
 
+
+def raise_open_file_limit(floor=1024, target=4096):
+    """Raise a too-low FD limit (macOS defaults to 256) so SQLite can't fail with 'unable to open database file'. No-op on Windows and on already-healthy limits (>=floor)."""
+    try:
+        import resource
+    except ImportError:
+        return  # Windows has no RLIMIT_NOFILE
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except Exception:
+        return
+    if soft == resource.RLIM_INFINITY or soft >= floor:
+        return  # already comfortable - don't touch healthy limits
+    ceiling = target if hard == resource.RLIM_INFINITY else min(target, hard)
+    new_soft = soft
+    for candidate in (ceiling, 2048, 1024):
+        if candidate <= soft:
+            break
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (candidate, hard))
+            new_soft = candidate
+            break
+        except (ValueError, OSError):
+            continue
+    if new_soft > soft:
+        startup.info(f"Raised open-file limit {soft} -> {new_soft} (macOS default 256 is too low).")
+    if new_soft < floor:
+        startup.warn(
+            f"Open-file limit is only {new_soft}, which can make the database "
+            "intermittently unreadable. Start the bot from a terminal after: ulimit -n 4096"
+        )
+
+
 if __name__ == "__main__":
     # ── Proxy support (--proxy flag) ───────────────────────────────────────────
     # Pass --proxy <url> to route all game API traffic through a proxy server.
@@ -814,19 +907,14 @@ if __name__ == "__main__":
             # Capture output so a failure shows pip's reason, not a bare exit code.
             result = subprocess.run(full_command, timeout=1200, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, env=_pip_env())
-            if result.returncode != 0:
-                tail = (result.stdout or "").strip().splitlines()[-15:]
-                startup.phase_fail("Update failed",
-                                   details=["Failed to install requirements (pip "
-                                            f"exit {result.returncode}):", *tail],
-                                   fix="pip install -r requirements.txt")
-                return False
-            return True
-        except Exception as e:
-            startup.phase_fail("Update failed",
-                               details=[f"Failed to install requirements: {e}"],
-                               fix="pip install -r requirements.txt")
-            return False
+            if result.returncode == 0:
+                return True
+        except Exception:
+            pass  # fall through to the per-package retry below
+
+        # Retry each package alone so one locked/unbuildable OCR dep doesn't sink the update.
+        startup.warn("Some requirements didn't install in one pass - retrying them individually.")
+        return _install_requirements_individually(requirements_txt_path)
 
     def is_legacy_version():
         """KS bot prior to v1.x used autoupdateinfo.txt instead of a version file."""
@@ -1248,6 +1336,7 @@ if __name__ == "__main__":
         "conn_changes": "db/changes.sqlite",
         "conn_users": "db/users.sqlite",
         "conn_settings": "db/settings.sqlite",
+        "conn_id_channel": "db/id_channel.sqlite",
     }
 
     connections = {name: sqlite3.connect(path) for name, path in databases.items()}
@@ -1408,6 +1497,20 @@ if __name__ == "__main__":
             if "last_attempt_at" not in uc_cols:
                 conn_giftcode.execute("ALTER TABLE user_giftcodes ADD COLUMN last_attempt_at TEXT")
 
+        with connections["conn_id_channel"] as conn_id_channel:
+            conn_id_channel.execute("""CREATE TABLE IF NOT EXISTS id_channels (
+                guild_id INTEGER,
+                alliance_id INTEGER,
+                channel_id INTEGER,
+                created_at TEXT,
+                created_by INTEGER,
+                UNIQUE(guild_id, channel_id)
+            )""")
+            # Tracks the standing info message so it can be edited instead of reposted.
+            _idc_cols = {r[1] for r in conn_id_channel.execute("PRAGMA table_info(id_channels)")}
+            if "info_message_id" not in _idc_cols:
+                conn_id_channel.execute("ALTER TABLE id_channels ADD COLUMN info_message_id INTEGER")
+
         with connections["conn_alliance"] as conn_alliance:
             conn_alliance.execute("""CREATE TABLE IF NOT EXISTS alliancesettings (
                 alliance_id INTEGER PRIMARY KEY,
@@ -1423,6 +1526,16 @@ if __name__ == "__main__":
                 conn_alliance.execute(
                     "ALTER TABLE alliancesettings ADD COLUMN auto_remove_on_transfer INTEGER DEFAULT 0"
                 )
+
+            # Per-alliance ID channel info message: post it, and pin it. Posting is
+            # off by default so an update never writes into an existing channel.
+            for _col, _default in (("id_post_info_message", "0"), ("id_pin_info_message", "1")):
+                try:
+                    conn_alliance.execute(f"SELECT {_col} FROM alliancesettings LIMIT 1")
+                except sqlite3.OperationalError:
+                    conn_alliance.execute(
+                        f"ALTER TABLE alliancesettings ADD COLUMN {_col} INTEGER DEFAULT {_default}"
+                    )
 
             # Per-alliance gate for who can upload screenshots in the
             # Screenshot Upload channels (0 = anyone, 1 = bot admins only).
@@ -1469,6 +1582,31 @@ if __name__ == "__main__":
                         "INSERT OR REPLACE INTO bot_global_settings VALUES ('sync_log_migrated', '1')"
                     )
 
+            # v1.x posted redemption progress to the gift code channel, so those installs
+            # have no Sync Channel for the migration above to inherit. Fall back to the
+            # gift code channel. Needs its own flag - the one above already ran for them.
+            with connections["conn_settings"] as _cs:
+                _giftfb_done = _cs.execute(
+                    "SELECT 1 FROM bot_global_settings WHERE setting_key = 'redeem_channel_gift_fallback'"
+                ).fetchone()
+            if not _giftfb_done:
+                try:
+                    _gift_channels = connections["conn_giftcode"].execute(
+                        "SELECT alliance_id, channel_id FROM giftcode_channel WHERE channel_id IS NOT NULL"
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    _gift_channels = []   # table absent on a fresh install
+                for _aid, _cid in _gift_channels:
+                    conn_alliance.execute(
+                        "UPDATE alliancesettings SET redemption_channel_id = ? "
+                        "WHERE alliance_id = ? AND redemption_channel_id IS NULL",
+                        (_cid, _aid),
+                    )
+                with connections["conn_settings"] as _cs:
+                    _cs.execute(
+                        "INSERT OR REPLACE INTO bot_global_settings VALUES ('redeem_channel_gift_fallback', '1')"
+                    )
+
             conn_alliance.execute("""CREATE TABLE IF NOT EXISTS alliance_list (
                 alliance_id INTEGER PRIMARY KEY,
                 name TEXT,
@@ -1490,6 +1628,7 @@ if __name__ == "__main__":
                 conn_alliance.execute("ALTER TABLE alliance_list ADD COLUMN state_locked INTEGER DEFAULT 0")
                 conn_alliance.execute("UPDATE alliance_list SET state_locked = 1 WHERE kid IS NOT NULL")
 
+    raise_open_file_limit()
     create_tables()
     startup.phase_ok("Database ready")
 
