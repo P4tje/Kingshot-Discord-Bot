@@ -256,9 +256,12 @@ async def _record_batch_result(cog, batch_id, alliance_id, success):
     alliances[alliance_id]['codes_completed'] = alliances[alliance_id].get('codes_completed', 0) + 1
     codes_done = alliances[alliance_id]['codes_completed']
 
+    if not success:
+        alliances[alliance_id]['had_error'] = True
+    had_error = alliances[alliance_id].get('had_error', False)
     if codes_done >= total_codes:
-        alliances[alliance_id]['status'] = 'completed' if success else 'error'
-    elif success:
+        alliances[alliance_id]['status'] = 'completed' if not had_error else 'error'
+    elif not had_error:
         alliances[alliance_id]['status'] = 'processing'
     else:
         alliances[alliance_id]['status'] = 'error'
@@ -813,8 +816,8 @@ def set_summary_settings(cog, alliance_id, *, enabled=None, success=None, alread
     cog.settings_conn.commit()
 
 
-def _summary_names_block(names, limit=1024) -> str:
-    """One name per line, truncated to fit `limit` chars, with an overflow pointer to Redemption History."""
+def _summary_names_block(names, limit=1024, overflow="see Redemption History") -> str:
+    """One name per line, truncated to fit `limit` chars, with an overflow pointer."""
     out, used = [], 0
     for n in names:
         need = len(n) + 2  # + newline + LRM
@@ -827,7 +830,7 @@ def _summary_names_block(names, limit=1024) -> str:
     text = "\n".join(out)
     more = len(names) - len(out)
     if more > 0:
-        text += f"\n…and {more} more - see Redemption History"
+        text += f"\n…and {more} more - {overflow}"
     return text
 
 

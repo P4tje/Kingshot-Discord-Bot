@@ -5,7 +5,6 @@ import discord
 from discord.ext import commands
 import sqlite3
 import logging
-from contextlib import closing
 from datetime import datetime
 import re
 from .notification_event_types import get_event_icon
@@ -70,13 +69,16 @@ def format_repeat_interval(repeat_minutes, notification_id=None) -> str:
         if notification_id is None:
             return "Custom Days"
 
-        with closing(sqlite3.connect("db/beartime.sqlite")) as conn:
+        conn = sqlite3.connect("db/beartime.sqlite")
+        try:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT weekday FROM notification_days
                 WHERE notification_id = ?
             """, (notification_id,))
             rows = cursor.fetchall()
+        finally:
+            conn.close()
 
         weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         day_set = set()
@@ -379,12 +381,13 @@ class EmbedDataView(discord.ui.View):
     async def notification_setting(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
 
-        with closing(sqlite3.connect("db/beartime.sqlite")) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT channel_id, hour, minute, description, mention_type, repeat_minutes, next_notification, timezone, notification_type FROM bear_notifications WHERE id = ?",
-                (self.notification_id,))
-            result = cursor.fetchone()
+        conn = sqlite3.connect("db/beartime.sqlite")
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT channel_id, hour, minute, description, mention_type, repeat_minutes, next_notification, timezone, notification_type FROM bear_notifications WHERE id = ?",
+            (self.notification_id,))
+        result = cursor.fetchone()
+        conn.close()
 
         if not result:
             await interaction.followup.send(f"{theme.deniedIcon} Notification not found in database.", ephemeral=True)
@@ -447,12 +450,13 @@ class PlainEditorView(discord.ui.View):
 
         if self.repeat == -1:
             try:
-                with closing(sqlite3.connect("db/beartime.sqlite")) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT weekday FROM notification_days WHERE notification_id = ?", (self.notification_id,))
-                    weekday_value = cursor.fetchone()
-                    if weekday_value:
-                        self.weekdays = weekday_value[0]
+                conn = sqlite3.connect("db/beartime.sqlite")
+                cursor = conn.cursor()
+                cursor.execute("SELECT weekday FROM notification_days WHERE notification_id = ?", (self.notification_id,))
+                weekday_value = cursor.fetchone()
+                if weekday_value:
+                    self.weekdays = weekday_value[0]
+                conn.close()
             except Exception as e:
                 logger.error(f"Failed to load weekdays: {e}")
                 print(f"Failed to load weekdays: {e}")
@@ -936,91 +940,104 @@ class NotificationEditor(commands.Cog):
             )
             return
 
-        with closing(sqlite3.connect("db/beartime.sqlite")) as conn:
+        conn = sqlite3.connect("db/beartime.sqlite")
+        try:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT channel_id, hour, minute, description, mention_type, repeat_minutes, next_notification, timezone, notification_type, event_type FROM bear_notifications WHERE id = ?",
                 (notification_id,))
             result = cursor.fetchone()
-            embed_results = None
-            if result and "EMBED_MESSAGE" in result[3]:
+
+            if not result:
+                await interaction.response.send_message(f"{theme.deniedIcon} Notification ID not found.", ephemeral=True)
+                return
+
+            channel_id, hours, minutes, description, mention, repeat, next_notification, timezone, notification_type, event_type = result
+            if "EMBED_MESSAGE" in description:
                 cursor.execute(
                     "SELECT title, description, color, image_url, thumbnail_url, footer, author, mention_message FROM bear_notification_embeds WHERE notification_id = ?",
                     (notification_id,))
                 embed_results = cursor.fetchone()
+                if not embed_results:
+                    await interaction.response.send_message(
+                        f"{theme.deniedIcon} Embed data is missing for this notification.",
+                        ephemeral=True
+                    )
+                    return
+                title, embed_description, color, image_url, thumbnail_url, footer, author, mention_message = embed_results
 
-        if not result:
-            await interaction.response.send_message(f"{theme.deniedIcon} Notification ID not found.", ephemeral=True)
-            return
+                view = EmbedDataView(self, notification_id, title, embed_description, color, image_url, thumbnail_url,
+                                     footer, author, mention_message, event_type, hours, minutes, next_notification)
 
-        channel_id, hours, minutes, description, mention, repeat, next_notification, timezone, notification_type, event_type = result
-        if "EMBED_MESSAGE" in description:
-            title, embed_description, color, image_url, thumbnail_url, footer, author, mention_message = embed_results
-
-            view = EmbedDataView(self, notification_id, title, embed_description, color, image_url, thumbnail_url,
-                                 footer, author, mention_message, event_type, hours, minutes, next_notification)
-
-            # Replace variables for initial display
-            embed = discord.Embed(
-                title=view._replace_variables(title),
-                description=view._replace_variables(embed_description),
-                color=color,
-            )
-            if footer:
-                embed.set_footer(text=view._replace_variables(footer))
-            if author:
-                embed.set_author(name=view._replace_variables(author))
-            if image_url:
-                embed.set_image(url=image_url)
-            if thumbnail_url:
-                embed.set_thumbnail(url=thumbnail_url)
-
-            mention_preview = view._replace_variables(mention_message) if mention_message else ""
-
-            await interaction.response.defer()
-            if original_message:
-                await original_message.edit(content=mention_preview, embed=embed, view=view)
-                message = original_message
-            else:
-                message = await interaction.followup.send(content=mention_preview, embed=embed, view=view,
-                                                          ephemeral=True)
-
-        elif "PLAIN_MESSAGE" in description:
-            try:
-                view = PlainEditorView(self, notification_id, channel_id, hours, minutes, description, mention, repeat,
-                                       next_notification, timezone, notification_type)
-
-                next_notification_date = datetime.fromisoformat(next_notification).strftime("%d/%m/%Y")
-                formatted_repeat = format_repeat_interval(repeat, notification_id)
-                formatted_mention = format_mention(mention)
-                formatted_type = format_notification_type(notification_type)
+                # Replace variables for initial display
                 embed = discord.Embed(
-                    title="Editing Notification",
-                    description=(
-                        f"**{theme.calendarIcon} Next Notification date:** {next_notification_date}\n"
-                        f"**{theme.timeIcon} Time:** {hours:02d}:{minutes:02d} ({timezone})\n"
-                        f"**{theme.announceIcon} Channel:** <#{channel_id}>\n"
-                        f"**{theme.editListIcon} Description:** {description}\n\n"
-                        f"**{theme.settingsIcon} Notification Type**\n{formatted_type}\n\n"
-                        f"**{theme.membersIcon} Mention:** {formatted_mention}\n"
-                        f"**{theme.retryIcon} Repeat:** {formatted_repeat}\n"
-                    ),
-                    color=theme.emColor1,
+                    title=view._replace_variables(title),
+                    description=view._replace_variables(embed_description),
+                    color=color,
                 )
-                await interaction.response.defer()
-                message = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-            except Exception as e:
-                logger.error(f"Error during PLAIN_MESSAGE handling: {e}")
-                print(f"[ERROR] During PLAIN_MESSAGE handling: {e}")
-                await interaction.followup.send(f"An error occurred in PLAIN_MESSAGE section. {e}", ephemeral=True)
-                return
-        else:
-            logger.warning(f"No known format matched, description is {description}")
+                if footer:
+                    embed.set_footer(text=view._replace_variables(footer))
+                if author:
+                    embed.set_author(name=view._replace_variables(author))
+                if image_url:
+                    embed.set_image(url=image_url)
+                if thumbnail_url:
+                    embed.set_thumbnail(url=thumbnail_url)
 
-        view.message = message
+                mention_preview = view._replace_variables(mention_message) if mention_message else ""
+
+                await interaction.response.defer()
+                if original_message:
+                    await original_message.edit(content=mention_preview, embed=embed, view=view)
+                    message = original_message
+                else:
+                    message = await interaction.followup.send(content=mention_preview, embed=embed, view=view,
+                                                              ephemeral=True)
+
+            elif "PLAIN_MESSAGE" in description:
+                try:
+                    view = PlainEditorView(self, notification_id, channel_id, hours, minutes, description, mention, repeat,
+                                           next_notification, timezone, notification_type)
+
+                    next_notification_date = datetime.fromisoformat(next_notification).strftime("%d/%m/%Y")
+                    formatted_repeat = format_repeat_interval(repeat, notification_id)
+                    formatted_mention = format_mention(mention)
+                    formatted_type = format_notification_type(notification_type)
+                    embed = discord.Embed(
+                        title="Editing Notification",
+                        description=(
+                            f"**{theme.calendarIcon} Next Notification date:** {next_notification_date}\n"
+                            f"**{theme.timeIcon} Time:** {hours:02d}:{minutes:02d} ({timezone})\n"
+                            f"**{theme.announceIcon} Channel:** <#{channel_id}>\n"
+                            f"**{theme.editListIcon} Description:** {description}\n\n"
+                            f"**{theme.settingsIcon} Notification Type**\n{formatted_type}\n\n"
+                            f"**{theme.membersIcon} Mention:** {formatted_mention}\n"
+                            f"**{theme.retryIcon} Repeat:** {formatted_repeat}\n"
+                        ),
+                        color=theme.emColor1,
+                    )
+                    await interaction.response.defer()
+                    message = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+                except Exception as e:
+                    logger.error(f"Error during PLAIN_MESSAGE handling: {e}")
+                    print(f"[ERROR] During PLAIN_MESSAGE handling: {e}")
+                    await interaction.followup.send(f"An error occurred in PLAIN_MESSAGE section. {e}", ephemeral=True)
+                    return
+            else:
+                logger.warning(f"No known format matched, description is {description}")
+                await interaction.response.send_message(
+                    f"{theme.deniedIcon} Could not parse this notification's format.",
+                    ephemeral=True
+                )
+                return
+
+            view.message = message
+        finally:
+            conn.close()
 
     async def update_notification(self, view):
-        with closing(sqlite3.connect("db/beartime.sqlite")) as conn:
+        conn = sqlite3.connect("db/beartime.sqlite")
+        try:
             cursor = conn.cursor()
 
             if view.repeat == -1:
@@ -1044,6 +1061,8 @@ class NotificationEditor(commands.Cog):
             cursor.execute("SELECT guild_id FROM bear_notifications WHERE id = ?", (view.notification_id,))
             result = cursor.fetchone()
             guild_id = result[0] if result else None
+        finally:
+            conn.close()
 
         # Notify schedule boards of update
         if guild_id:
@@ -1052,7 +1071,8 @@ class NotificationEditor(commands.Cog):
                 await schedule_cog.on_notification_updated(guild_id, view.channel_id)
 
     async def update_embed_notification(self, view):
-        with closing(sqlite3.connect("db/beartime.sqlite")) as conn:
+        conn = sqlite3.connect("db/beartime.sqlite")
+        try:
             cursor = conn.cursor()
 
             cursor.execute(
@@ -1065,6 +1085,8 @@ class NotificationEditor(commands.Cog):
             # Get guild_id and channel_id for schedule board update
             cursor.execute("SELECT guild_id, channel_id FROM bear_notifications WHERE id = ?", (view.notification_id,))
             result = cursor.fetchone()
+        finally:
+            conn.close()
 
         if result:
             guild_id, channel_id = result

@@ -624,7 +624,7 @@ class NotificationSystem(commands.Cog):
 
             # If start_date is provided, use it as the base date (for wizard updates)
             if start_date:
-                next_notification = start_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                next_notification = tz.localize(start_date.replace(hour=hour, minute=minute, second=0, microsecond=0, tzinfo=None))
             else:
                 # Fall back to existing behavior: keep current date, update time only
                 self.cursor.execute("SELECT next_notification FROM bear_notifications WHERE id = ?", (notification_id,))

@@ -781,9 +781,6 @@ class MinisterArchive(commands.Cog):
 
     async def show_archive_appointments(self, interaction: discord.Interaction, archive_id: int, appointment_type: str):
         """Show detailed appointment list for a specific activity day in an archive"""
-        # Get alliance database connection
-        alliance_conn = sqlite3.connect('db/alliance.sqlite')
-        alliance_cursor = alliance_conn.cursor()
         try:
             # Get appointments for this archive and appointment type
             self.svs_cursor.execute("""
@@ -820,8 +817,6 @@ class MinisterArchive(commands.Cog):
             logger.error(f"Error loading appointments: {e}")
             print(f"Error loading appointments: {e}")
             await interaction.response.send_message(f"{theme.deniedIcon} Error loading appointments: {e}", ephemeral=True)
-        finally:
-            alliance_conn.close()
 
     async def update_appointments_embed(self, interaction: discord.Interaction, view: ArchiveAppointmentsView):
         """Update the appointments embed with paginated records"""

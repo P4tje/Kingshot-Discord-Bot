@@ -582,15 +582,15 @@ class MinisterChannelView(discord.ui.View):
         log_channel_id = await minister_schedule_cog.get_channel_id(log_context)
         log_guild = await minister_schedule_cog.get_log_guild(interaction.guild)
 
-        channel = log_guild.get_channel(channel_id)
-        log_channel = log_guild.get_channel(log_channel_id)
-
         if not log_guild:
             await interaction.response.send_message(
                 "Could not find the minister log server. Make sure the bot is in that server.\n\nIf issue persists, run the `/settings` command --> Other Features --> Minister Scheduling --> Delete Server ID and try again in the desired server",
                 ephemeral=True
             )
             return
+
+        channel = log_guild.get_channel(channel_id)
+        log_channel = log_guild.get_channel(log_channel_id)
 
         if not channel or not log_channel:
             await interaction.response.send_message(
@@ -1594,6 +1594,13 @@ class MinisterMenu(commands.Cog):
             return
 
         log_guild = await minister_schedule_cog.get_log_guild(interaction.guild)
+        if not log_guild:
+            await interaction.response.send_message(
+                "Could not find the minister log server. Make sure the bot is in that server.\n\nIf issue persists, run the `/settings` command --> Other Features --> Minister Scheduling --> Delete Server ID and try again in the desired server",
+                ephemeral=True
+            )
+            return
+
         log_channel_id = await minister_schedule_cog.get_channel_id("minister log channel")
         log_channel = log_guild.get_channel(log_channel_id)
 

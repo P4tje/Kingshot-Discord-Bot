@@ -626,7 +626,14 @@ class AllianceHistory(commands.Cog):
             with sqlite3.connect('db/alliance.sqlite') as alliance_db:
                 cursor = alliance_db.cursor()
                 cursor.execute("SELECT alliance_id FROM alliance_list WHERE name = ?", (alliance_name,))
-                alliance_id = cursor.fetchone()[0]
+                row = cursor.fetchone()
+                if not row:
+                    await interaction.followup.send(
+                        f"{theme.deniedIcon} Alliance **{alliance_name}** not found.",
+                        ephemeral=True
+                    )
+                    return
+                alliance_id = row[0]
 
             with sqlite3.connect('db/users.sqlite') as users_db:
                 cursor = users_db.cursor()
@@ -636,6 +643,13 @@ class AllianceHistory(commands.Cog):
                     WHERE alliance = ?
                 """, (alliance_id,))
                 members = {fid: name for fid, name in cursor.fetchall()}
+
+            if not members:
+                await interaction.followup.send(
+                    f"No level changes found in the last {human_readable_time} for {alliance_name}.",
+                    ephemeral=True
+                )
+                return
 
             with sqlite3.connect('db/changes.sqlite', timeout=30.0) as conn:
                 cursor = conn.cursor()
@@ -683,7 +697,14 @@ class AllianceHistory(commands.Cog):
             with sqlite3.connect('db/alliance.sqlite') as alliance_db:
                 cursor = alliance_db.cursor()
                 cursor.execute("SELECT alliance_id FROM alliance_list WHERE name = ?", (alliance_name,))
-                alliance_id = cursor.fetchone()[0]
+                row = cursor.fetchone()
+                if not row:
+                    await interaction.followup.send(
+                        f"{theme.deniedIcon} Alliance **{alliance_name}** not found.",
+                        ephemeral=True
+                    )
+                    return
+                alliance_id = row[0]
 
             with sqlite3.connect('db/users.sqlite') as users_db:
                 cursor = users_db.cursor()
@@ -693,6 +714,13 @@ class AllianceHistory(commands.Cog):
                     WHERE alliance = ?
                 """, (alliance_id,))
                 members = {fid: name for fid, name in cursor.fetchall()}
+
+            if not members:
+                await interaction.followup.send(
+                    f"No nickname changes found in the last {human_readable_time} for {alliance_name}.",
+                    ephemeral=True
+                )
+                return
 
             with sqlite3.connect('db/changes.sqlite', timeout=30.0) as conn:
                 cursor = conn.cursor()

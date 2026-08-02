@@ -191,8 +191,8 @@ class Alliance(commands.Cog):
     async def settings(self, interaction: discord.Interaction):
         try:
             if interaction.guild is not None: # Check bot permissions only if in a guild
-                perm_check = interaction.guild.get_member(interaction.client.user.id)
-                if not perm_check.guild_permissions.administrator:
+                perm_check = interaction.guild.me
+                if perm_check is None or not perm_check.guild_permissions.administrator:
                     await interaction.response.send_message(
                         f"Beeb boop {theme.robotIcon} I need **Administrator** permissions to function. "
                         "Go to server settings --> Roles --> find my role --> scroll down and turn on Administrator", 
