@@ -41,7 +41,7 @@ class _UpdateAndRestartView(discord.ui.View):
         health_cog = self.bot.get_cog("BotHealth")
         if not health_cog:
             await interaction.response.send_message(
-                f"{theme.deniedIcon} Bot Health module not found — cannot restart.",
+                f"{theme.deniedIcon} Bot Health module not found. The bot can't restart.",
                 ephemeral=True,
             )
             return
@@ -372,7 +372,7 @@ class BotOperations(commands.Cog):
                             f"Click **Update & Restart** below to install the "
                             f"update now.\n\n{theme.warnIcon} **Windows host "
                             f"detected.** The bot will stop after downloading "
-                            f"the update — someone with host access needs to "
+                            f"the update. Someone with host access needs to "
                             f"start it again with `python main.py` for the "
                             f"update to finish installing."
                         )
@@ -522,7 +522,7 @@ class BotPresenceView(discord.ui.View):
                 f"{theme.upperDivider}\n"
                 f"**Currently:** {current}\n"
                 f"{theme.lowerDivider}\n"
-                f"_Streaming requires a valid Twitch or YouTube URL — without "
+                f"_Streaming requires a valid Twitch or YouTube URL. Without "
                 f"it, Discord shows the activity as Playing._"
             ),
             color=theme.emColor1,

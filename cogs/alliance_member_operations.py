@@ -768,7 +768,7 @@ class ManageMembersView(MemberListView):
                 f"**Format**\n"
                 f"{theme.upperDivider}\n"
                 f"• Header row with an **`ID`** (or `FID`) column, or the bot's export file as-is.\n"
-                f"• Add a **`Name`** and/or **`TC Level`** column to set them - members already "
+                f"• Add a **`Name`** and/or **`TC Level`** column to set them. Members already "
                 f"in the alliance get updated, new ones are added already named.\n"
                 f"• Levels take either form: `82` or `TC 10-2`.\n"
                 f"• A plain list of IDs (one per line or comma-separated) works too.\n"

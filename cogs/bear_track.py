@@ -2072,8 +2072,8 @@ class BearSession:
                 f"{theme.processingIcon} {phase_label}{lang_part}…"
             )
             footer_line = (
-                f"\n\n{theme.hourglassIcon} You can click **Done Uploading** anytime — "
-                f"it will wait for current screenshots to finish before opening the review."
+                f"\n\n{theme.hourglassIcon} You can click **Done Uploading** anytime. "
+                f"It will wait for current screenshots to finish before opening the review."
             )
         else:
             status_line = ""
@@ -2234,7 +2234,7 @@ async def _ack_component(interaction: discord.Interaction) -> bool:
 async def _retire_stale_recovery(interaction: discord.Interaction) -> None:
     """Retire a recovery message whose session is gone so its button isn't left dead."""
     embed = discord.Embed(
-        description=f"{theme.hourglassIcon} This bear upload recovery has expired — nothing to submit.",
+        description=f"{theme.hourglassIcon} This bear upload recovery has expired. Nothing to submit.",
         color=theme.emColor2,
     )
     try:
@@ -2560,10 +2560,10 @@ def render_bear_info_message() -> str:
         "",
         f"{theme.listIcon} **What to upload**",
         f"{theme.upperDivider}",
-        "• The **Bear Hunt result mail** — the one headed **\"Battle Overview\"** "
+        "• The **Bear Hunt result mail**, the one headed **\"Battle Overview\"** "
         "with **Rallies** and **Total Alliance Damage**, followed by the "
         "**Damage Ranking** list.",
-        "• The **Damage Ranking** reward pages — to add everyone below the mail's "
+        "• The **Damage Ranking** reward pages, to add everyone below the mail's "
         "top ranks. Open **Bear Trap → Rewards → Damage Ranking**, or "
         "**Events → Bear Hunt → Damage Rewards → Damage Ranking**.",
         f"{theme.lowerDivider}",
@@ -3406,7 +3406,7 @@ class BearTrack(commands.Cog):
         if timed_out:
             prefixes.append(
                 f"{theme.hourglassIcon} **Session timed out after "
-                f"{session.timeout_min} min** — review and Submit when ready."
+                f"{session.timeout_min} min**. Review and Submit when ready."
             )
         if dropped_screenshots:
             prefixes.append(
@@ -3419,7 +3419,7 @@ class BearTrack(commands.Cog):
         if prefixes:
             embed.description = "\n".join(prefixes) + "\n\n" + (embed.description or "")
         if not session.any_ocr_success:
-            embed.title = f"{theme.warnIcon} OCR could not read the image(s) — add rows manually"
+            embed.title = f"{theme.warnIcon} OCR could not read the image(s): add rows manually"
 
         channel = self.bot.get_channel(session.channel_id)
         if session.progress_msg is not None:
@@ -3686,8 +3686,8 @@ class BearTrack(commands.Cog):
             ):
                 setup_hint = (
                     f"{theme.warnIcon} **New here?** Click **Bear Channel "
-                    f"Setup** below to pick a channel for an ally — until "
-                    f"that's done the bot won't process any screenshots.\n\n"
+                    f"Setup** below to pick a channel for an ally. Until "
+                    f"that's done, the bot won't process any screenshots.\n\n"
                 )
 
             embed = discord.Embed(
@@ -3824,7 +3824,7 @@ class RetryOcrPreviewView(discord.ui.View):
         await interaction.response.edit_message(
             content=(
                 f"{theme.infoIcon} Re-OCR with `{self.new_primary_lang}` "
-                f"discarded — the review below is unchanged."
+                f"discarded. The review below is unchanged."
             ),
             view=None,
         )
@@ -4019,7 +4019,7 @@ class BearHuntReviewView(discord.ui.View):
             parts.append(
                 f"{theme.warnIcon} *Many rows didn't match cleanly. "
                 f"If this happens often, your OCR language may not fit your "
-                f"alliance's player names — adjust under "
+                f"alliance's player names. Adjust under "
                 f"**Settings → Bear Tracking → OCR Languages**.*"
             )
         parts.append(
@@ -4039,7 +4039,7 @@ class BearHuntReviewView(discord.ui.View):
             )
         action_lines.append(
             f"{theme.verifiedIcon} **Submit**\n"
-            f"└ Save this hunt — including unmatched rows you can fix later."
+            f"└ Save this hunt, including unmatched rows you can fix later."
         )
         parts.append("\n".join(action_lines))
         embed = discord.Embed(
@@ -4122,7 +4122,7 @@ class BearHuntReviewView(discord.ui.View):
         if unresolved:
             embed.set_footer(
                 text=f"{unresolved} row(s) without a confirmed player will be saved "
-                     f"as unmatched — resolve them now or later from Bear Damage Records."
+                     f"as unmatched. Resolve them now or later from Bear Damage Records."
             )
         return embed
 
@@ -4343,7 +4343,7 @@ class BearHuntReviewView(discord.ui.View):
             content=(
                 f"Pick an OCR engine to retry with. New rows the chosen "
                 f"engine finds are **added or used to upgrade weak matches** "
-                f"in the review below — your existing confirmed rows stay "
+                f"in the review below. Your existing confirmed rows stay "
                 f"intact.\n"
                 f"Your alliance's permanent OCR setting is not changed; "
                 f"adjust it under **Settings → Bear Tracking → OCR Languages** "
@@ -6043,7 +6043,7 @@ async def _offer_add_by_id(interaction, view, *, row_id, fid, damage, rank, raw_
     if not verified:
         await interaction.followup.send(
             f"{theme.deniedIcon} Couldn't confirm ID `{fid}` in kingdom `{alliance_kid}`. "
-            f"They may be in a different kingdom, or the ID is wrong - add them under Alliance Management → "
+            f"They may be in a different kingdom, or the ID is wrong. Add them under Alliance Management → "
             f"Manage Members first, then match the row.",
             ephemeral=True)
         return
@@ -6130,7 +6130,7 @@ class PlayerAddConfirmView(discord.ui.View):
         if not await check_interaction_user(interaction, self.original_user_id):
             return
         await interaction.response.edit_message(
-            embed=discord.Embed(description=f"{theme.deniedIcon} Cancelled — no player added.",
+            embed=discord.Embed(description=f"{theme.deniedIcon} Cancelled. No player added.",
                                 color=theme.emColor2),
             view=None)
 
@@ -6567,7 +6567,7 @@ class BearSettingsView(discord.ui.View):
         embed = discord.Embed(
             title=f"{theme.settingsIcon} Bear Settings",
             description=(
-                f"Operational settings — session pacing, cleanup, who "
+                f"Operational settings: session pacing, cleanup, who "
                 f"can interact with the system and more. \n\n"
                 f"**Available Settings**\n"
                 f"{theme.upperDivider}\n"
@@ -6834,7 +6834,7 @@ class BearOcrLanguagesView(discord.ui.View):
             f"└ Re-OCR rows the primary couldn't read (mixed-script alliances).\n\n"
             f"{theme.cleanIcon} **Auto-manage**\n"
             f"└ On: the bot picks fallback engines automatically from your "
-            f"members' name scripts — Cyrillic, Arabic, etc. enabled only when a "
+            f"members' name scripts. Cyrillic, Arabic, etc. are enabled only when a "
             f"member actually uses them, and dropped when they leave. Turn off to "
             f"choose fallbacks manually.\n"
             f"{theme.lowerDivider}\n"
@@ -6852,7 +6852,7 @@ class BearOcrLanguagesView(discord.ui.View):
         if not stats:
             return (
                 f"\n{theme.upperDivider}\n"
-                f"**Effectiveness** — *no OCR runs recorded yet for this "
+                f"**Effectiveness**: *no OCR runs recorded yet for this "
                 f"alliance. Stats appear here after a few hunts.*\n"
                 f"{theme.lowerDivider}"
             )
@@ -7590,8 +7590,8 @@ class DataSubmit:
 
         if unmatched:
             embed.set_footer(
-                text=f"{matched} matched · {unmatched} saved as unmatched — "
-                     f"resolve from Bear Damage Records when ready."
+                text=f"{matched} matched · {unmatched} saved as unmatched. "
+                     f"Resolve from Bear Damage Records when ready."
             )
 
         # Build the per-player breakdown alongside the chart so both ride in a

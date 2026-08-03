@@ -52,12 +52,12 @@ def check_mention_placeholder_misuse(text: str, is_embed: bool = False) -> str |
         if is_embed:
             return (
                 f"{theme.warnIcon} You typed `{examples}` but mentions don't work inside embeds.\n"
-                f"Use `{{tag}}` instead - it will add the mention above the embed."
+                f"Use `{{tag}}` instead. It will add the mention above the embed."
             )
         else:
             return (
                 f"{theme.warnIcon} You typed `{examples}` but this won't ping anyone.\n"
-                f"Use `{{tag}}` instead - it will be replaced with your configured mention."
+                f"Use `{{tag}}` instead. It will be replaced with your configured mention."
             )
     return None
 

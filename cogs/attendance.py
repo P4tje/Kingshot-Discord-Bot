@@ -803,13 +803,13 @@ class EditEventDetailsView(discord.ui.View):
             logger.error(f"Re-match unmatched failed for session {self.session_id}: {e}")
             print(f"Re-match unmatched failed for session {self.session_id}: {e}")
             await interaction.response.send_message(
-                f"{theme.deniedIcon} Re-match failed — see logs.", ephemeral=True)
+                f"{theme.deniedIcon} Re-match failed. See logs.", ephemeral=True)
             return
         if resolved:
             msg = (f"{theme.verifiedIcon} Re-matched **{resolved}** previously-unmatched "
                    f"player(s) to the roster.")
         else:
-            msg = (f"{theme.infoIcon} No unmatched rows could be resolved — the roster "
+            msg = (f"{theme.infoIcon} No unmatched rows could be resolved. The roster "
                    f"still has no confident match for them.")
         await interaction.response.send_message(msg, ephemeral=True)
 
@@ -2292,7 +2292,7 @@ class Attendance(commands.Cog):
             lead = "Select an alliance from the dropdown to begin."
             title = f"{theme.listIcon} Attendance"
         else:
-            lead = f"Acting on **{alliance_name}** — use the dropdown to switch alliance."
+            lead = f"Acting on **{alliance_name}**. Use the dropdown to switch alliance."
             title = f"{theme.listIcon} Attendance · {alliance_name}"
         embed = discord.Embed(
             title=title,

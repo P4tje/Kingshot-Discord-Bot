@@ -162,7 +162,7 @@ class AllianceRegistration(commands.Cog):
     @discord.app_commands.describe(
         fid="Your In-Game ID",
         alliance="Your Alliance Name",
-        kingdom="Your kingdom number - only needed if your alliance spans several kingdoms",
+        kingdom="Your kingdom number. Only needed if your alliance spans several kingdoms",
         name="Your in-game name",
         level="Your town center level, like 30 or TC 10",
     )

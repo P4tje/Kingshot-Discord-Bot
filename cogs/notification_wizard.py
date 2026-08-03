@@ -891,7 +891,7 @@ class EventReferenceDateModal(discord.ui.Modal):
             parsed = datetime.strptime(value, "%Y-%m-%d")
         except ValueError:
             await interaction.response.send_message(
-                f"{theme.deniedIcon} Invalid date - use YYYY-MM-DD (e.g. 2026-07-19).",
+                f"{theme.deniedIcon} Invalid date. Use YYYY-MM-DD (e.g. 2026-07-19).",
                 ephemeral=True,
             )
             return
@@ -900,7 +900,7 @@ class EventReferenceDateModal(discord.ui.Modal):
         if parsed.weekday() != default_ref.weekday():
             weekday = default_ref.strftime("%A")
             await interaction.response.send_message(
-                f"{theme.deniedIcon} {self.event_name} runs on a {weekday} - enter a {weekday} date.",
+                f"{theme.deniedIcon} {self.event_name} runs on a {weekday}. Enter a {weekday} date.",
                 ephemeral=True,
             )
             return
@@ -937,7 +937,7 @@ class EventRotationView(discord.ui.View):
             description=(
                 f"{theme.upperDivider}\n"
                 f"Servers can run global events on a different rotation. Pick an event and "
-                f"enter a date it actually ran on your server - all its future dates shift "
+                f"enter a date it actually ran on your server, and all its future dates shift "
                 f"to match. Leave the date blank to return to the default rotation.\n\n"
                 + "\n".join(lines) +
                 f"\n{theme.lowerDivider}"
@@ -1923,7 +1923,7 @@ class CaesaresFuryConfigView(discord.ui.View):
                 f"**Next Event Window:** {window_text}\n"
                 f"**Duration:** 3 consecutive days\n\n"
                 f"You can schedule **up to 5 Caesares Fury bosses** at any time during the 3-day window.\n"
-                f"Some alliances run several bosses early, others spread them out - it's up to you!\n\n"
+                f"Some alliances run several bosses early, others spread them out. It's up to you!\n\n"
                 f"**Scheduled Bosses ({len(self.boss_times)}/5):**\n{boss_list}"
             ),
             color=theme.emColor1

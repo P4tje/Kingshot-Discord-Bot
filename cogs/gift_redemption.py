@@ -135,7 +135,7 @@ async def handle_member_redeem_process(cog, process):
 
 # Shown when a new code can't be confirmed yet; schedule_revalidation re-tests it within minutes.
 PENDING_REVALIDATION_NOTICE = (
-    "⏳ Not confirmed yet - re-checking automatically; it redeems as soon as it validates."
+    "⏳ Not confirmed yet. Re-checking automatically; it redeems as soon as it validates."
 )
 
 # Backoff (seconds) for re-testing an inconclusive new code, then the 2h loop.
@@ -1315,7 +1315,7 @@ async def handle_state_resolve_process(cog, process):
 
         if interrupted:
             await progress.update(
-                wave[0], f"{theme.infoIcon} Paused while gift codes redeem - "
+                wave[0], f"{theme.infoIcon} Paused while gift codes redeem. "
                          f"`{len(remaining)}` member(s) left.")
             cog.logger.info(f"GiftOps: state_resolve paused for higher-priority work - "
                             f"{len(remaining)} member(s) left")
@@ -2194,14 +2194,14 @@ async def use_giftcode_for_alliance(cog, alliance_id, giftcode, process=None):
                         "TOO_SMALL_SPEND_MORE": f"{theme.warnIcon} **" + "{count}" + "** members failed due to insufficient town center level.",
                         "TIMEOUT_RETRY": f"{theme.timeIcon} **" + "{count}" + "** members were staring into the void, until the void finally timed out on them.",
                         "LOGIN_EXPIRED_MID_PROCESS": f"{theme.lockIcon} **" + "{count}" + "** members login failed mid-process. How'd that even happen?",
-                        "ROLE_NOT_EXIST": f"{theme.membersIcon} **" + "{count}" + "** members no longer exist in the game. Ghosts don't redeem codes - remove them from the alliance!",
+                        "ROLE_NOT_EXIST": f"{theme.membersIcon} **" + "{count}" + "** members no longer exist in the game. Ghosts don't redeem codes. Remove them from the alliance!",
                         "NO_STATE": f"{theme.globeIcon} **" + "{count}" + "** members are off the map with no kingdom on file. Point them to their kingdom so the codes can find their way home!",
                         "STATE_MISMATCH": f"{theme.globeIcon} **" + "{count}" + "** members are hiding out in the wrong kingdom - the game wasn't fooled. Update their kingdom and the rewards will follow.",
                         "SIGN_ERROR": f"{theme.lockIcon} **" + "{count}" + "** members failed due to a signature error. Something went wrong.",
                         "ERROR": f"{theme.deniedIcon} **" + "{count}" + "** members failed due to a general error. Might want to check the logs.",
                         "UNKNOWN_API_RESPONSE": f"{theme.infoIcon} **" + "{count}" + "** members failed with an unknown API response. Say what?",
                         "CONNECTION_ERROR": f"{theme.globeIcon} **" + "{count}" + "** members failed due to bot connection issues. Did the admin trip over the cable again?",
-                        "DB_UNAVAILABLE": f"{theme.warnIcon} **" + "{count}" + "** members couldn't be checked because the bot couldn't open its database - a limit on this computer, not a missing kingdom. Restart the bot and re-run; if it keeps happening, raise the host's open-file limit (macOS: ulimit -n 4096)."
+                        "DB_UNAVAILABLE": f"{theme.warnIcon} **" + "{count}" + "** members couldn't be checked because the bot couldn't open its database. This is a limit on this computer, not a missing kingdom. Restart the bot and re-run; if it keeps happening, raise the host's open-file limit (macOS: ulimit -n 4096)."
                     }
 
                     base_description += "\n**Error Breakdown:**\n"

@@ -248,7 +248,7 @@ class AttendanceOCR(commands.Cog):
                     f"{theme.warnIcon} Couldn't identify the event in that screenshot.\n"
                     f"This channel accepts: **{enabled_labels}**\n"
                     f"If your screenshot is for one of these, the bot's text "
-                    f"recognition may have misread it — try a clearer screenshot, "
+                    f"recognition may have misread it. Try a clearer screenshot, "
                     f"or ask an admin to add the missing event type if your "
                     f"screenshot is for something else.",
                     delete_after=30,

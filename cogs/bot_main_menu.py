@@ -300,7 +300,7 @@ class MainMenu(commands.Cog):
                     f"Highest `{max_label}` · Avg `{avg_label}`"
                 )
             else:
-                stats_line = "_No members yet — use **Add Members** to get started_"
+                stats_line = "_No members yet. Use **Add Members** to get started_"
 
             if multistate:
                 kingdom_line = f"{theme.globeIcon} **Kingdom:** _multistate_ (members from many kingdoms)"
@@ -1957,7 +1957,7 @@ class AddAdminView(discord.ui.View):
             color=theme.emColor1,
         )
         if PermissionManager.get_owner_id() is None and not PermissionManager.list_admins():
-            embed.set_footer(text=f"No admins yet — {self.target_name} will become the Bot Owner automatically.")
+            embed.set_footer(text=f"No admins yet, so {self.target_name} will become the Bot Owner automatically.")
         return embed
 
     def _build(self):
@@ -2068,14 +2068,14 @@ class TransferOwnerView(discord.ui.View):
             description = (
                 f"{theme.warnIcon} **No eligible recipients.**\n\n"
                 f"Transfer Owner moves the bot ownership to another Global admin. "
-                f"There aren't any other Global admins yet — promote someone to "
+                f"There aren't any other Global admins yet. Promote someone to "
                 f"Global first (Permissions → pick admin → tier select → Global)."
             )
         else:
             description = (
                 f"{theme.upperDivider}\n"
                 f"Pick a Global admin to receive the Bot Owner badge. "
-                f"This is **immediate and atomic** — you become a regular Global, "
+                f"This is **immediate and atomic**. You become a regular Global, "
                 f"the recipient becomes the Owner.\n"
                 f"{theme.lowerDivider}"
             )

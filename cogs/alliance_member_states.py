@@ -21,7 +21,7 @@ def _detect_lines(cog, scope, label):
     out = [f"\n{theme.hourglassIcon} {label}: `{checked}/{running['total']}` members checked, "
            f"`{running.get('resolved', 0)}` fixed."]
     if running.get('status') == 'queued' and checked < running['total']:
-        out.append(f"└ Paused while gift codes redeem - it picks up where it left off.")
+        out.append(f"└ Paused while gift codes redeem. It picks up where it left off.")
     elif running.get('probe_total'):
         out.append(f"└ `{running['probe']}/{running['probe_total']}` kingdoms checked "
                    f"for the member being scanned.")
@@ -167,7 +167,7 @@ class StateManagementView(discord.ui.View):
 def _queue_result_text(queued, label):
     """Shared wording for the two detect buttons."""
     if queued is None:
-        return f"Already detecting kingdoms for members {label} - it's working through them."
+        return f"Already detecting kingdoms for members {label}. It's working through them."
     if queued == 0:
         return f"No members are {label}."
     return (f"Queued {queued} member(s) {label}. This runs in the background and steps aside "
@@ -215,7 +215,7 @@ class WrongStateView(discord.ui.View):
         self._add_button("Back", theme.backIcon, discord.ButtonStyle.secondary, 3, self._on_back)
 
         lines = [
-            "The game rejected these members' kingdoms the last time a code was redeemed for them - "
+            "The game rejected these members' kingdoms the last time a code was redeemed for them. "
             "they transferred, or they left the game.\n",
             f"{theme.upperDivider}",
             f"{theme.stateIcon} **Members with a wrong kingdom:** `{len(self.rows)}`\n",
@@ -414,7 +414,7 @@ class MultistateView(discord.ui.View):
                 status = "Multistate" if on else (f"State {r['current_kid']}" if r["current_kid"] else "Unbound")
                 options.append(discord.SelectOption(
                     label=str(r["name"])[:100], value=str(r["alliance_id"]),
-                    description=f"{status} - tap to turn multistate {'off' if on else 'on'}"[:100],
+                    description=f"{status}. Tap to turn multistate {'off' if on else 'on'}"[:100],
                     emoji=theme.verifiedIcon if on else None,
                 ))
             select = discord.ui.Select(placeholder="Toggle an alliance's multistate flag", options=options, row=0)

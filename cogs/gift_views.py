@@ -473,7 +473,7 @@ class CreateGiftCodeModal(discord.ui.Modal):
                 else:
                     auto_redeem_line = f"{theme.refreshIcon} **Auto-redemption** is not enabled"
 
-                action_line = "Reactivated - re-validated and sent to API" if was_invalid else "Added to database and sent to API"
+                action_line = "Reactivated: re-validated and sent to API" if was_invalid else "Added to database and sent to API"
                 final_embed.title = f"{theme.verifiedIcon} Gift Code {'Reactivated' if was_invalid else 'Validated'}"
                 final_embed.description = (
                     f"**Gift Code Details**\n{theme.upperDivider}\n"
@@ -518,7 +518,7 @@ class CreateGiftCodeModal(discord.ui.Modal):
                         f"**Gift Code Details**\n{theme.upperDivider}\n"
                         f"{theme.giftIcon} **Gift Code:** `{code}`\n"
                         f"{theme.warnIcon} **Status:** {validation_msg}\n"
-                        f"{theme.editListIcon} **Action:** Saved - re-checking automatically\n"
+                        f"{theme.editListIcon} **Action:** Saved: re-checking automatically\n"
                         f"{gift_redemption.PENDING_REVALIDATION_NOTICE}\n"
                         f"{theme.lowerDivider}\n"
                     )

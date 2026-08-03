@@ -1371,8 +1371,8 @@ class BotHealth(commands.Cog):
         if is_windows_host:
             title = f"{theme.refreshIcon} Stopping the bot..."
             description = (
-                "The bot is stopping. On Windows the bot does not auto-restart "
-                "— start it again on the host (`python main.py`) and this "
+                "The bot is stopping. On Windows the bot does not auto-restart. "
+                "Start it again on the host (`python main.py`) and this "
                 "message will refresh once it's back online."
             )
         elif allow_update:
@@ -1664,7 +1664,7 @@ class BotHealth(commands.Cog):
                 f"{theme.refreshIcon} **Reload Cogs**\n"
                 f"└ Reload code from disk without restarting the whole bot\n"
                 f"{theme.refreshIcon} **Restart Bot**\n"
-                f"└ Full restart — stops the bot and relaunches it\n"
+                f"└ Full restart: stops the bot and relaunches it\n"
                 f"{theme.cleanIcon} **Clear Queue**\n"
                 f"└ Remove stuck or pending queued/failed queue items\n"
                 f"{theme.settingsIcon} **Settings**\n"
@@ -1812,7 +1812,7 @@ class HealthMenuView(discord.ui.View):
         if is_windows_host:
             tail = (
                 f"\n{theme.warnIcon} **Windows host detected.** The bot will "
-                f"stop here — it does **not** auto-restart. Someone with "
+                f"stop here. It does **not** auto-restart. Someone with "
                 f"access to the host needs to start it again with "
                 f"`python main.py`."
             )
@@ -1890,12 +1890,12 @@ class HealthMenuView(discord.ui.View):
                     f"{theme.upperDivider}\n"
                     + "\n".join(f"• {p}" for p in result_parts) + "\n"
                     f"{theme.lowerDivider}\n\n"
-                    f"**{len(unused_cogs)}** file(s) in `cogs/` look unused — they're "
+                    f"**{len(unused_cogs)}** file(s) in `cogs/` look unused. They're "
                     f"not loaded as cogs and aren't imported anywhere we could detect.\n\n"
                     f"{file_list}\n\n"
                     f"{theme.warnIcon} Files would be moved to `cogs/old_cogs_archive/` "
-                    f"(recoverable, not deleted). Review carefully before confirming — "
-                    f"any false positives can be added to **Manage Exceptions** first."
+                    f"(recoverable, not deleted). Review carefully before confirming. "
+                    f"Any false positives can be added to **Manage Exceptions** first."
                 ),
                 color=theme.emColor2,
             )
@@ -2012,7 +2012,7 @@ class HealthMenuView(discord.ui.View):
         counts = pq.queue_counts() if pq else {"queued": 0, "active": 0, "completed": 0, "failed": 0}
         if counts["queued"] + counts["failed"] == 0:
             await interaction.response.send_message(
-                f"{theme.verifiedIcon} The queue is already clear - nothing pending or failed.",
+                f"{theme.verifiedIcon} The queue is already clear. Nothing is pending or failed.",
                 ephemeral=True,
             )
             return

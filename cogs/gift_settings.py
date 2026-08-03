@@ -853,7 +853,7 @@ class RedemptionSummaryView(discord.ui.View):
                 picked = [lbl for lbl, on in (
                     ("Successful", s["success"]), ("Already Redeemed", s["already"]), ("Failed", s["failed"])
                 ) if on]
-                state = f"{theme.verifiedIcon} On — " + (", ".join(picked) if picked else "no buckets selected yet")
+                state = f"{theme.verifiedIcon} On: " + (", ".join(picked) if picked else "no buckets selected yet")
             desc += f"\n{theme.upperDivider}\n**{name}:** {state}\n{theme.lowerDivider}"
         return discord.Embed(
             title=f"{theme.redeemIcon} Redemption Summary",

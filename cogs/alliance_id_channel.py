@@ -829,7 +829,7 @@ class DeleteAfterModal(discord.ui.Modal):
         self.refresh = refresh  # async callable(interaction) — overrides default refresh
         self.timer_input = discord.ui.TextInput(
             label="Auto-delete delay in seconds (0-300)",
-            placeholder="10 — set 0 to keep replies forever",
+            placeholder="e.g. 10; set 0 to keep replies forever",
             default=str(current_value),
             required=True,
             max_length=3
@@ -887,7 +887,7 @@ class IDChannelSettingsView(discord.ui.View):
                 f"└ Scan for missed IDs when the bot starts or every 5 minutes\n\n"
                 f"{theme.listIcon} **Scan Limit:** `{scan_limit}` messages per channel\n"
                 f"└ Max messages checked per scan (lower = fewer API calls)\n\n"
-                f"{theme.editIcon} **Auto-Delete:** `{delete_text}`\n"
+                f"{theme.editListIcon} **Auto-Delete:** `{delete_text}`\n"
                 f"└ How long bot replies (errors, warnings) stay visible\n"
                 f"{theme.lowerDivider}"
             ),
