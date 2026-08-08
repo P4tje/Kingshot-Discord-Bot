@@ -156,12 +156,13 @@ class BotHealth(commands.Cog):
         # Cached bot directory size in MB; refreshed every 15 minutes by
         # update_bot_footprint_loop so dashboard renders stay instant.
         self._bot_footprint_mb: float | None = None
-        # Cached API status results; refreshed by api_status_loop so the
-        # dashboard doesn't depend on live HTTP calls (which can blow past
-        # Discord's 3 s interaction timeout on a slow VPS).
+        # Cached API status. Refreshed hourly by api_status_loop and lazily in
+        # the background when the dashboard is opened. Renders always serve the
+        # cache, so they never wait on a live HTTP call (Discord's 3 s limit).
         self._cached_wos_api: dict | None = None
         self._cached_gift_api: dict | None = None
         self._api_cache_at: datetime | None = None
+        self._api_refresh_task: asyncio.Task | None = None
 
         self._setup_database()
         self.maintenance_loop.start()
@@ -303,17 +304,16 @@ class BotHealth(commands.Cog):
         conn.commit()
         conn.close()
 
-    API_CACHE_TTL_SECONDS = 90  # refresh threshold; loop polls every 60s
-    API_CACHE_MAX_AGE_SECONDS = 600  # after this, treat cache as too stale to show
+    API_CACHE_STALE_SECONDS = 300  # opening the dashboard kicks a background refresh once the cache is older than this
 
     async def check_wos_api_status(self) -> dict:
-        """Cached Kingshot API status. Returns cache when fresh; otherwise probes
-        once and caches the result. Background api_status_loop keeps this warm
-        so dashboard renders stay under Discord's 3 s interaction timeout."""
-        if self._cached_wos_api and self._api_cache_at:
-            age = (datetime.now(timezone.utc) - self._api_cache_at).total_seconds()
-            if age < self.API_CACHE_TTL_SECONDS:
-                return self._cached_wos_api
+        """Cached Gift Redemption API status. Serves the cache and never blocks a
+        render on live HTTP; a stale cache triggers a background refresh instead.
+        Only the very first call (before the hourly loop has populated the cache)
+        probes inline."""
+        self._maybe_lazy_refresh()
+        if self._cached_wos_api is not None:
+            return self._cached_wos_api
         result = await self._probe_wos_api()
         self._cached_wos_api = result
         self._api_cache_at = datetime.now(timezone.utc)
@@ -348,14 +348,40 @@ class BotHealth(commands.Cog):
 
     async def check_gift_distribution_api(self) -> dict:
         """Cached Gift Distribution API status. See check_wos_api_status."""
-        if self._cached_gift_api and self._api_cache_at:
-            age = (datetime.now(timezone.utc) - self._api_cache_at).total_seconds()
-            if age < self.API_CACHE_TTL_SECONDS:
-                return self._cached_gift_api
+        self._maybe_lazy_refresh()
+        if self._cached_gift_api is not None:
+            return self._cached_gift_api
         result = await self._probe_gift_distribution_api()
         self._cached_gift_api = result
         self._api_cache_at = datetime.now(timezone.utc)
         return result
+
+    def _maybe_lazy_refresh(self) -> None:
+        """Kick a background probe of both APIs when the cache is missing or
+        older than API_CACHE_STALE_SECONDS. Never blocks the caller, and never
+        runs two refreshes at once."""
+        if self._api_cache_at is not None:
+            age = (datetime.now(timezone.utc) - self._api_cache_at).total_seconds()
+            if age < self.API_CACHE_STALE_SECONDS:
+                return
+        if self._api_refresh_task and not self._api_refresh_task.done():
+            return
+        self._api_refresh_task = asyncio.create_task(self._refresh_api_cache())
+
+    async def _refresh_api_cache(self) -> None:
+        """Probe both APIs once and store the results in the cache."""
+        try:
+            wos_result, gift_result = await asyncio.gather(
+                self._probe_wos_api(), self._probe_gift_distribution_api(),
+                return_exceptions=True,
+            )
+            if isinstance(wos_result, dict):
+                self._cached_wos_api = wos_result
+            if isinstance(gift_result, dict):
+                self._cached_gift_api = gift_result
+            self._api_cache_at = datetime.now(timezone.utc)
+        except Exception as e:
+            self.logger.warning(f"API status refresh failed: {e}")
 
     async def _probe_gift_distribution_api(self) -> dict:
         """Actual live probe — only called by the cached wrapper or the
@@ -1222,24 +1248,12 @@ class BotHealth(commands.Cog):
     async def before_maintenance_loop(self):
         await self.bot.wait_until_ready()
 
-    @tasks.loop(seconds=60)
+    @tasks.loop(hours=1)
     async def api_status_loop(self):
-        """Probe both APIs in the background and stuff the result into the
-        cache. Dashboard renders never wait on HTTP, eliminating the risk of
-        blowing past Discord's 3 s interaction timeout."""
-        try:
-            wos_task = asyncio.create_task(self._probe_wos_api())
-            gift_task = asyncio.create_task(self._probe_gift_distribution_api())
-            wos_result, gift_result = await asyncio.gather(
-                wos_task, gift_task, return_exceptions=True,
-            )
-            if not isinstance(wos_result, Exception):
-                self._cached_wos_api = wos_result
-            if not isinstance(gift_result, Exception):
-                self._cached_gift_api = gift_result
-            self._api_cache_at = datetime.now(timezone.utc)
-        except Exception as e:
-            self.logger.warning(f"API status refresh failed: {e}")
+        """Refresh the cached API status once an hour so the dashboard has a
+        warm value to show without a live probe. Runs once on startup, then
+        hourly; opening the dashboard also refreshes lazily in between."""
+        await self._refresh_api_cache()
 
     @api_status_loop.before_loop
     async def before_api_status_loop(self):
@@ -1292,6 +1306,8 @@ class BotHealth(commands.Cog):
             self.update_bot_footprint_loop.cancel()
         if self.api_status_loop.is_running():
             self.api_status_loop.cancel()
+        if self._api_refresh_task and not self._api_refresh_task.done():
+            self._api_refresh_task.cancel()
         self.logger.info("[HEALTH] Bot Health cog unloaded")
 
     def get_loaded_cogs(self) -> list:
