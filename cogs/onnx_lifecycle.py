@@ -9,6 +9,7 @@ import asyncio
 import gc
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
@@ -126,15 +127,30 @@ async def _evict_other_idle_models(keep_name: str) -> None:
         await _drain_and_collect()
 
 
+def _gc_and_trim() -> None:
+    """Collect, then hand freed heap back to the OS. glibc keeps freed onnxruntime
+    buffers in-process, so without malloc_trim the RSS stays high after an unload
+    and the next engine load OOMs a 512 MB container. No-op off glibc."""
+    gc.collect()
+    if sys.platform.startswith("linux"):
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+
+
 async def _drain_and_collect() -> None:
-    """Force idle to_thread workers to drop the last engine they touched, then
-    collect. Workers cache their previous task's result until they pick up
-    another task, so a no-op submission releases the stale reference."""
+    """Drop the engine reference an idle to_thread worker still caches, then collect
+    and trim. Runs in a worker (where the engine was built, so its glibc arena is
+    the one that gets trimmed) and on the main thread — arenas are capped at 2 via
+    MALLOC_ARENA_MAX, so this reaches both. The worker submission also releases the
+    stale result the worker cached from the previous task."""
     try:
-        await asyncio.to_thread(lambda: None)
+        await asyncio.to_thread(_gc_and_trim)
     except Exception:
         pass
-    gc.collect()
+    _gc_and_trim()
 
 
 def get_status_lines() -> list[dict]:
@@ -192,6 +208,12 @@ class LazyOnnxModel:
 
     async def acquire(self):
         """Increment refcount. Loads the model if it isn't already."""
+        if LOW_MEM_MODE and not self.pinned:
+            # Drop any other idle engine BEFORE loading this one, so a
+            # multi-language fallback (en→korean→…) peaks at a single engine in
+            # memory. Evicting after the load briefly stacks old+new during the
+            # ~3s model load and OOM-kills a 512 MB container.
+            await _evict_other_idle_models(self.name)
         async with self._lock:
             if self._model is None:
                 logger.info(f"OCR model loading: {self.name}")
@@ -201,12 +223,6 @@ class LazyOnnxModel:
             self._last_used = datetime.now(timezone.utc)
             self._unload_pending_since = None
             model = self._model
-        if LOW_MEM_MODE and not self.pinned:
-            # Keep only one OCR engine resident on low-memory boxes: drop any
-            # other idle engine so a multi-language fallback run (en→arabic→…)
-            # runs sequentially in memory instead of stacking 5 engines and
-            # OOM-killing the container.
-            await _evict_other_idle_models(self.name)
         return model
 
     async def release(self) -> None:
