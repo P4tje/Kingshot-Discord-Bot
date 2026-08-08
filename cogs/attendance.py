@@ -2754,17 +2754,26 @@ class Attendance(commands.Cog):
 
 class SessionSelectView(discord.ui.View):
     """Unified session select view for both marking and viewing"""
-    def __init__(self, sessions, alliance_id, cog, is_viewing=False):
+    PAGE_SIZE = 25  # Discord's hard cap on select options
+
+    def __init__(self, sessions, alliance_id, cog, is_viewing=False, page=0):
         super().__init__(timeout=7200)
         self.sessions = sessions
         self.alliance_id = alliance_id
         self.cog = cog
         self.is_viewing = is_viewing
- 
-        # Add dropdown for session selection only if there are sessions
-        if sessions:
+        self.page = page
+        self.max_page = max(0, (len(sessions) - 1) // self.PAGE_SIZE) if sessions else 0
+        self._build_components()
+
+    def _build_components(self):
+        self.clear_items()
+
+        # Session dropdown for the current page (only if there are sessions)
+        if self.sessions:
+            start = self.page * self.PAGE_SIZE
             options = []
-            for session in sessions[:25]:  # Discord limit
+            for session in self.sessions[start:start + self.PAGE_SIZE]:
                 event_label, event_icon = event_type_display(session.get('event_type', 'Other'))
                 event_subtype = session.get('event_subtype')
                 legion_suffix = f" [L{event_subtype[-1]}]" if event_subtype else ""
@@ -2774,34 +2783,60 @@ class SessionSelectView(discord.ui.View):
                     description=f"{session.get('date', 'Unknown date')} - {session.get('marked_count', 0)}/{session.get('player_count', 0)} marked",
                     emoji=event_icon
                 ))
-            
-            select = discord.ui.Select(
-                placeholder=f"{theme.listIcon} Select a session...",
-                options=options
-            )
+
+            placeholder = f"{theme.listIcon} Select a session..."
+            if self.max_page > 0:
+                placeholder += f" (Page {self.page + 1}/{self.max_page + 1})"
+            select = discord.ui.Select(placeholder=placeholder, options=options)
             select.callback = lambda interaction: self.on_select(interaction)
             self.add_item(select)
-        
+
+        # Prev/Next only when the sessions span more than one page
+        if self.max_page > 0:
+            prev_button = discord.ui.Button(
+                label="", emoji=f"{theme.prevIcon}", style=discord.ButtonStyle.secondary,
+                disabled=self.page == 0, row=1
+            )
+            prev_button.callback = self.prev_page_callback
+            self.add_item(prev_button)
+
+            next_button = discord.ui.Button(
+                label="", emoji=f"{theme.nextIcon}", style=discord.ButtonStyle.secondary,
+                disabled=self.page >= self.max_page, row=1
+            )
+            next_button.callback = self.next_page_callback
+            self.add_item(next_button)
+
         # New Session button (only for marking mode)
         if not self.is_viewing:
             new_session_button = discord.ui.Button(
                 label="New Session",
                 style=discord.ButtonStyle.primary,
                 emoji=theme.addIcon,
-                row=1
+                row=2
             )
             new_session_button.callback = self.new_session_callback
             self.add_item(new_session_button)
-        
+
         # Back button (always shown)
         back_button = discord.ui.Button(
             label="Back", emoji=f"{theme.backIcon}",
             style=discord.ButtonStyle.secondary,
-            row=1
+            row=2
         )
         back_button.callback = self.back_button_callback
         self.add_item(back_button)
-    
+
+    async def prev_page_callback(self, interaction: discord.Interaction):
+        self.page = max(0, self.page - 1)
+        self._build_components()
+        await interaction.response.edit_message(view=self)
+
+    async def next_page_callback(self, interaction: discord.Interaction):
+        self.page = min(self.max_page, self.page + 1)
+        self._build_components()
+        await interaction.response.edit_message(view=self)
+
     async def new_session_callback(self, interaction: discord.Interaction):
         """Create a new session"""
         await interaction.response.send_modal(SessionNameModal(self.alliance_id, self.cog))
