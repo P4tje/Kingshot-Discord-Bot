@@ -19,6 +19,7 @@ from . import alliance_power_changes
 from .attendance_ocr_parsers import (
     EVENT_TYPES,
     _STAT_LABELS,
+    STATS_PANEL_EVENTS,
     load_alliance_roster,
     fuzzy_match_name,
     assign_unique_fids,
@@ -469,12 +470,13 @@ class EventReviewView(discord.ui.View):
             i = start + offset + 1  # global row number, stable across pages
             absent = is_result and self.zero_is_absent and not r["value"]
             icon = theme.deniedIcon if absent else _STATUS_ICON.get(r["status"], "")
-            if r["status"] in ("auto", "manual") and r["fid"]:
-                player = f"`{_isolate_rtl(r['nickname'])}` (`{r['fid']}`)"
-            elif r["status"] in ("likely", "review") and r["fid"]:
-                player = f"`{_isolate_rtl(r['nickname'])}` ({r['status']}) (`{r['fid']}`)"
+            name = _isolate_rtl(r["nickname"] or r["name"] or "?")  # never empty: empty backticks break the line
+            if r["status"] in ("auto", "manual") and r["fid"] and r["fid"] > 0:
+                player = f"`{name}` (`{r['fid']}`)"
+            elif r["status"] in ("likely", "review") and r["fid"] and r["fid"] > 0:
+                player = f"`{name}` ({r['status']}) (`{r['fid']}`)"
             else:
-                player = f"`{_isolate_rtl(r['name'])}` — no match"
+                player = f"`{name}` — no match"
             tail = "`Absent`" if absent else f"`{_format_int(r['value'])}`"
             line = _ltr_line(f"**#{i}** {icon} {player} — {tail}")
             if budget_remaining - len(line) - 1 < 0:
@@ -782,6 +784,16 @@ class EventReviewView(discord.ui.View):
             btn.callback = cb
             self.add_item(btn)
 
+        # Canyon result mails carry a stats + MVP panel; always offer the editor
+        # there (fix a misread, or fill a panel OCR missed), plus wherever any
+        # stat/MVP was parsed.
+        if self.session.db_event_type in STATS_PANEL_EVENTS or self.session.stats or self.session.mvps:
+            stats_btn = discord.ui.Button(
+                label="Stats & MVPs", emoji=theme.crownIcon,
+                style=discord.ButtonStyle.secondary, row=2)
+            stats_btn.callback = self._on_edit_stats
+            self.add_item(stats_btn)
+
         # Row 3: Back (edit mode autosaves) — or Submit / Cancel (upload review).
         if self.edit_mode:
             row3 = [
@@ -993,6 +1005,10 @@ class EventReviewView(discord.ui.View):
         else:
             await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
+    async def _on_edit_stats(self, interaction: discord.Interaction):
+        view = _StatsMvpEditView(self)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
     # ── persistence ───────────────────────────────────────────────────────
 
     def _persist(self) -> tuple[str, list[dict]]:
@@ -1060,8 +1076,11 @@ class EventReviewView(discord.ui.View):
         present_fids = set()
         zero_absent = self.zero_is_absent
         for r in self.result_rows:
-            # 0 points = joined-but-did-nothing = absent (Swordland/Tri-Alliance).
-            row_status = "absent" if (zero_absent and not r["value"]) else "present"
+            # Honor a reopened row's saved present/absent so an untouched Submit
+            # round-trips unchanged; edits clear it and fall back to the rule
+            # (0 points = joined-but-did-nothing = absent for Swordland/Tri-Alliance).
+            row_status = r.get("saved_status") or (
+                "absent" if (zero_absent and not r["value"]) else "present")
             if r["fid"]:
                 if row_status == "present":
                     present_fids.add(r["fid"])
@@ -1469,6 +1488,76 @@ class _ConfirmDeleteEventView(discord.ui.View):
             embed=self.parent.build_embed(), view=self.parent)
 
 
+class _StatsMvpEditView(discord.ui.View):
+    """Sub-view for editing a result mail's Battle Stats + MVP panel, one stat at
+    a time. Pick a stat -> a modal edits its total + MVP together."""
+
+    def __init__(self, parent: "EventReviewView"):
+        super().__init__(timeout=7200)
+        self.parent = parent
+        self._build()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await self.parent.interaction_check(interaction)
+
+    def _stat_keys(self) -> list[str]:
+        """Stats to offer, in canonical order: the full panel for a panel event
+        (so a missed panel can be filled from scratch), plus any already parsed."""
+        order = list(_STAT_LABELS)
+        keys = set(self.parent.session.stats) | {m["stat_key"] for m in self.parent.session.mvps}
+        if self.parent.session.db_event_type in STATS_PANEL_EVENTS:
+            keys |= set(order)
+        return sorted(keys, key=lambda k: order.index(k) if k in order else len(order))
+
+    def _mvp_for(self, stat_key: str) -> Optional[dict]:
+        return next((m for m in self.parent.session.mvps
+                     if m["stat_key"] == stat_key), None)
+
+    def build_embed(self) -> discord.Embed:
+        lines = []
+        for k in self._stat_keys():
+            agg = self.parent.session.stats.get(k)
+            mvp = self._mvp_for(k)
+            agg_txt = _format_compact(agg) if agg is not None else "—"
+            mvp_txt = (f"{mvp['name']} (`{_format_compact(mvp['value'])}`)"
+                       if mvp else "—")
+            lines.append(f"**{_STAT_LABELS.get(k, k)}** — total `{agg_txt}` · MVP {mvp_txt}")
+        return discord.Embed(
+            title=f"{theme.crownIcon} Stats & MVPs",
+            description="Pick a stat to correct its total and MVP.\n\n" + "\n".join(lines),
+            color=theme.emColor1)
+
+    def _build(self):
+        self.clear_items()
+        options = [
+            discord.SelectOption(
+                label=_STAT_LABELS.get(k, k)[:100], value=k,
+                description=(f"MVP: {m['name']}" if (m := self._mvp_for(k)) else "no MVP set")[:100])
+            for k in self._stat_keys()
+        ]
+        if options:
+            select = discord.ui.Select(placeholder="Edit a stat…", options=options, row=0)
+            select.callback = self._on_pick
+            self.add_item(select)
+        back = discord.ui.Button(label="Back", emoji=theme.backIcon,
+                                 style=discord.ButtonStyle.secondary, row=1)
+        back.callback = self._on_back
+        self.add_item(back)
+
+    async def _on_pick(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(
+            _StatEditModal(self, interaction.data["values"][0]))
+
+    async def _on_back(self, interaction: discord.Interaction):
+        self.stop()
+        await interaction.response.edit_message(
+            embed=self.parent.build_embed(), view=self.parent)
+
+    async def rerender(self, interaction: discord.Interaction):
+        self._build()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+
 # ── modals ────────────────────────────────────────────────────────────────
 
 async def _resolve_player_field(interaction: discord.Interaction,
@@ -1530,6 +1619,79 @@ async def _add_unknown_fid(interaction, view, fid):
             (fid, nick, str(kid), str(alliance_id)))
         conn.commit()
     return True, nick, f"{theme.verifiedIcon} Added **{nick}** (ID `{fid}`) to the alliance and matched the row."
+
+
+class _StatEditModal(discord.ui.Modal):
+    """Edit one stat's aggregate total and its MVP (player + value) together.
+    Blank the total to clear the stat; blank the MVP player to clear the MVP."""
+
+    def __init__(self, sub_view: "_StatsMvpEditView", stat_key: str):
+        super().__init__(title=f"Edit {_STAT_LABELS.get(stat_key, stat_key)}"[:45])
+        self.sub_view = sub_view
+        self.stat_key = stat_key
+        session = sub_view.parent.session
+        agg = session.stats.get(stat_key)
+        mvp = sub_view._mvp_for(stat_key)
+        self.total_input = discord.ui.TextInput(
+            label="Total value (blank to clear)", required=False, max_length=20,
+            default=(str(agg) if agg is not None else ""))
+        self.mvp_player_input = discord.ui.TextInput(
+            label="MVP player (ID or name; blank clears)", required=False, max_length=80,
+            default=(mvp["name"] if mvp else ""))
+        self.mvp_value_input = discord.ui.TextInput(
+            label="MVP value", required=False, max_length=20,
+            default=(str(mvp["value"]) if mvp else ""))
+        for item in (self.total_input, self.mvp_player_input, self.mvp_value_input):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        parent = self.sub_view.parent
+        session = parent.session
+
+        total_raw = self.total_input.value.strip()
+        if total_raw:
+            total = _parse_value_input(total_raw)
+            if total is None:
+                await interaction.response.send_message(
+                    f"{theme.deniedIcon} Total must be a whole number.", ephemeral=True)
+                return
+            session.stats[self.stat_key] = total
+        else:
+            session.stats.pop(self.stat_key, None)
+
+        # Rebuild this stat's MVP: blank player removes it, otherwise resolve the
+        # player exactly like a row edit so an ID or name both work.
+        note = None
+        session.mvps = [m for m in session.mvps if m["stat_key"] != self.stat_key]
+        player_text = self.mvp_player_input.value.strip()
+        if player_text:
+            mvp_value = _parse_value_input(self.mvp_value_input.value)
+            if mvp_value is None:
+                await interaction.response.send_message(
+                    f"{theme.deniedIcon} MVP value must be a whole number.", ephemeral=True)
+                return
+            fid, nickname, _status, note = await _resolve_player_field(
+                interaction, parent, player_text)
+            session.mvps.append({
+                "stat_key": self.stat_key,
+                "name": nickname or player_text,
+                "value": mvp_value,
+                "fid_str": str(fid) if fid else None,
+            })
+
+        # Autosave when editing a saved session (mirrors the row-edit path).
+        if parent.edit_mode:
+            try:
+                parent._persist()
+            except Exception as e:
+                logger.exception("Attendance stat/MVP autosave failed")
+                await interaction.response.send_message(
+                    f"{theme.deniedIcon} Couldn't save: {e}", ephemeral=True)
+                return
+
+        await self.sub_view.rerender(interaction)
+        if note:
+            await interaction.followup.send(note, ephemeral=True)
 
 
 class _EditMergedRowModal(discord.ui.Modal):
@@ -1611,7 +1773,8 @@ class _EditMergedRowModal(discord.ui.Modal):
     def _apply(bucket, idx, value, kind, fid, nickname, status, name) -> Optional[int]:
         if idx is not None and idx < len(bucket):
             bucket[idx].update(
-                {"value": value, "fid": fid, "nickname": nickname, "status": status})
+                {"value": value, "fid": fid, "nickname": nickname, "status": status,
+                 "saved_status": None})  # editing clears the stored present/absent
             return idx
         elif value:
             bucket.append({"name": nickname or name, "value": value, "fid": fid,
@@ -1674,7 +1837,8 @@ class _EditRowModal(discord.ui.Modal):
         if self.local_idx is not None and self.local_idx < len(self.bucket):
             # Update in place so the original OCR name (alias key) and _kind survive.
             self.bucket[self.local_idx].update(
-                {"value": value, "fid": fid, "nickname": nickname, "status": status})
+                {"value": value, "fid": fid, "nickname": nickname, "status": status,
+                 "saved_status": None})  # editing clears the stored present/absent
             displaced = self.view._apply_fid_collision(self.bucket, self.local_idx, fid) if fid else []
         await self.view._save_edit(interaction)
         messages = []

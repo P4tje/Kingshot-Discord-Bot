@@ -160,6 +160,45 @@ class AttendanceReport(commands.Cog):
             result = cursor.fetchone()
             return result[0] if result else "Unknown Alliance"
 
+    def _resolve_session_id(self, alliance_id, session_name):
+        """Session id for this alliance's session by name, or None."""
+        try:
+            with sqlite3.connect('db/attendance.sqlite') as db:
+                row = db.execute(
+                    "SELECT session_id FROM attendance_records "
+                    "WHERE session_name = ? AND alliance_id = ? LIMIT 1",
+                    (session_name, str(alliance_id))).fetchone()
+            return row[0] if row else None
+        except Exception:
+            return None
+
+    def _add_edit_button(self, view, alliance_id, session_name, session_id):
+        """Add an Edit button that reopens the session's editor via the Attendance
+        cog, which routes OCR sessions to the review editor (fix scores/MVPs).
+        Always shown on a full report; the session id is resolved at click so a
+        report path that didn't thread it through still gets a working button."""
+        edit_button = discord.ui.Button(
+            label="Edit", emoji=f"{theme.editListIcon}", style=discord.ButtonStyle.secondary)
+
+        async def edit_callback(edit_interaction: discord.Interaction):
+            attendance_cog = self.bot.get_cog("Attendance")
+            if not attendance_cog:
+                await edit_interaction.response.send_message(
+                    f"{theme.deniedIcon} Attendance module not loaded.", ephemeral=True)
+                return
+            sid = session_id or self._resolve_session_id(alliance_id, session_name)
+            if not sid:
+                await edit_interaction.response.send_message(
+                    f"{theme.deniedIcon} Couldn't find this session to edit.", ephemeral=True)
+                return
+            alliance_name = await self._get_alliance_name(alliance_id)
+            await attendance_cog.show_attendance_marking(
+                edit_interaction, alliance_id, alliance_name, session_name,
+                session_id=sid, is_edit=True)
+
+        edit_button.callback = edit_callback
+        view.add_item(edit_button)
+
     async def get_user_report_preference(self, user_id):
         """Get user's report preference"""
         try:
@@ -924,6 +963,9 @@ class AttendanceReport(commands.Cog):
                 back_button.callback = back_callback
                 view.add_item(back_button)
                 
+                # Edit button - reopens the session's editor (fix scores/MVPs).
+                self._add_edit_button(view, alliance_id, session_name, session_id)
+
                 # Export button - only for full reports
                 export_button = discord.ui.Button(
                     label="Export",
@@ -1333,6 +1375,9 @@ class AttendanceReport(commands.Cog):
 
                 back_button.callback = back_callback
                 view.add_item(back_button)
+
+                # Edit button - reopens the session's editor (fix scores/MVPs).
+                self._add_edit_button(view, alliance_id, session_name, session_id)
 
             # Export button
             export_button = discord.ui.Button(

@@ -208,6 +208,11 @@ _STAT_LABELS: dict[str, str] = {
     "advances":        "Advances",
 }
 
+# Events whose result mail carries the Battle Stats + per-stat MVP panel. Their
+# editor is always offered (so a missed panel can be filled by hand); other
+# events (Foundry, Power Rankings, Showdown) have no panel and hide it.
+STATS_PANEL_EVENTS: frozenset[str] = frozenset({"canyon_clash"})
+
 # Allowed event-time slots (UTC). Mirrors notification_event_types.EVENT_CONFIG.
 EVENT_TIME_SLOTS: dict[str, tuple[str, ...]] = {
     "foundry_battle":  ("02:00", "12:00", "14:00", "19:00"),
@@ -483,11 +488,18 @@ def _parse_mvps(text: str) -> list[dict]:
     def _overlaps_stat_span(start: int, end: int) -> bool:
         return any(s_start < end and start < s_end for s_start, s_end, _ in stat_spans)
 
+    # A stat label is never a player name. OCR sometimes drops a label's value so
+    # step 1 can't mask it, leaving the bare label to read as "<label>: <value>"
+    # (e.g. Speedups' MVP came out as "Total March Accelerator II Used") — reject it.
+    stat_label_re = re.compile("|".join(p for _, p in _RESULT_STAT_KEYS), re.IGNORECASE)
+
     # 2) Find every plausible "<name>: <value>" pair that's OUTSIDE every stat span.
     name_value_re = re.compile(r"([A-Za-z_][\w\-' ]{1,30}?)\s*:\s*([\d.,]+[KkMmBb]?)")
     candidates: list[tuple[int, int, str, str]] = []
     for m in name_value_re.finditer(text):
         if _overlaps_stat_span(m.start(), m.end()):
+            continue
+        if stat_label_re.search(m.group(1)):
             continue
         candidates.append((m.start(), m.end(), m.group(1).strip(), m.group(2).strip()))
 
@@ -980,12 +992,16 @@ def assign_unique_fids(raw_rows: list[dict], roster: list[tuple[int, str]],
     enriched: list[dict] = []
     for raw in raw_rows:
         cands = fuzzy_match_candidates(raw["name"], roster, alliance_id=alliance_id)
+        # Trust a reopened row's saved fid instead of re-matching. Positive = a real
+        # member (fall back to saved name); negative = unmatched placeholder, kept.
+        trusted = raw.get("fid")
+        if trusted is not None and trusted > 0:
+            nickname, status = nick_by_fid.get(trusted) or raw.get("name"), "manual"
+        else:
+            nickname, status = None, "no_match"
         enriched.append({
-            **raw,
-            "candidates": cands,
-            "fid": None,
-            "nickname": None,
-            "status": "no_match",
+            **raw, "candidates": cands, "fid": trusted,
+            "nickname": nickname, "status": status,
         })
 
     # Higher-value row wins ties.
@@ -1002,7 +1018,8 @@ def assign_unique_fids(raw_rows: list[dict], roster: list[tuple[int, str]],
     ]
     pool.sort(key=lambda c: (-c[0], c[1]))
 
-    assigned_fids: set[int] = set()
+    # Trusted (already-assigned) fids are reserved so no fresh match steals them.
+    assigned_fids: set[int] = {r["fid"] for r in enriched if r["fid"] is not None}
     for _score, _prio, row_idx, fid, nick, status in pool:
         row = enriched[row_idx]
         if row["fid"] is not None or fid in assigned_fids:
@@ -1334,9 +1351,10 @@ def _load_existing_session_data(session_id: str) -> dict:
 
         out["rows"] = [
             {"fid": int(r[0]) if r[0] and str(r[0]).lstrip("-").isdigit() else None,
-             "name": r[1], "value": int(r[2]) if r[2] is not None else 0}
+             "name": r[1], "value": int(r[2]) if r[2] is not None else 0,
+             "saved_status": r[3]}
             for r in conn.execute(
-                "SELECT player_id, player_name, points FROM attendance_records "
+                "SELECT player_id, player_name, points, status FROM attendance_records "
                 "WHERE session_id = ? AND status IN ('present', 'absent') "
                 "ORDER BY points DESC",
                 (session_id,),

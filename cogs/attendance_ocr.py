@@ -361,12 +361,16 @@ class AttendanceOCR(commands.Cog):
         session.alliance_scores = data.get("alliance_scores", [])
         session.stats = data.get("stats", {})
         session.mvps = data.get("mvps", [])
+        # Carry the saved fid + present/absent so the editor reflects the stored
+        # record (not a fresh re-match) and an untouched Submit round-trips unchanged.
         session.result_rows = [
-            {"name": r.get("name") or "", "value": int(r.get("value") or 0)}
+            {"name": r.get("name") or "", "value": int(r.get("value") or 0),
+             "fid": r.get("fid"), "saved_status": r.get("saved_status")}
             for r in data.get("rows", [])
         ]
         session.registered_rows = [
-            {"name": r.get("name") or "", "value": int(r.get("value") or 0)}
+            {"name": r.get("name") or "", "value": int(r.get("value") or 0),
+             "fid": r.get("fid"), "saved_status": r.get("saved_status")}
             for r in data.get("registered_rows", [])
         ]
 

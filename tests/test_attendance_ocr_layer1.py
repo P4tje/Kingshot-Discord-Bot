@@ -685,6 +685,25 @@ def test_assign_unique_fids_preserves_input_fields():
     assert result[0]["extra"] == "preserved"
 
 
+def test_assign_unique_fids_trusts_preset_fid():
+    """A reopened saved row carries its fid; the matcher must keep it (not
+    re-match by name), reserve it so a fresh row can't steal it, and preserve
+    a negative placeholder id instead of churning a new one."""
+    roster = [(100, "Alice"), (200, "Bob")]
+    out = parsers.assign_unique_fids(
+        [{"name": "unrelated", "value": 9, "fid": 200},  # trusted -> owns 200
+         {"name": "Bob", "value": 1}],                    # fresh -> must not get 200
+        roster)
+    assert out[0]["fid"] == 200 and out[0]["status"] == "manual"
+    assert out[1]["fid"] != 200
+    # negative placeholder preserved, not re-churned
+    assert parsers.assign_unique_fids(
+        [{"name": "Ghost", "value": 3, "fid": -2}], roster)[0]["fid"] == -2
+    # a row with no fid still matches normally
+    assert parsers.assign_unique_fids(
+        [{"name": "Alice", "value": 5}], roster)[0]["fid"] == 100
+
+
 # ---------------------------------------------------------------------------
 # _dedup_into — substring-containment dedup across screenshots
 # ---------------------------------------------------------------------------
@@ -1056,6 +1075,19 @@ def test_parse_mvps_simple_pairs():
     assert by_key["squads_defeated"]["value"] == 122
     assert by_key["buildings"]["name"] == "AlejoCAT"
     assert by_key["buildings"]["value"] == 25
+
+
+def test_parse_mvps_rejects_stat_label_as_name():
+    # Regression: OCR dropped Speedups' value, so the bare stat label
+    # "Total March Accelerator II Used" bled in and was read as the MVP name.
+    text = (
+        "Total Fuel Used: 24.6M vtr: 3.4M "
+        "Total Battle Speedups Used: Total March Accelerator II Used: 65 "
+        "Total Retreats: 11 iLEENA: 4"
+    )
+    names = [m["name"] for m in parsers._parse_mvps(text)]
+    assert not any("March Accelerator" in n for n in names), f"stat label leaked: {names}"
+    assert "vtr" in names and "iLEENA" in names  # real MVPs still parse
 
 
 # ---------------------------------------------------------------------------
