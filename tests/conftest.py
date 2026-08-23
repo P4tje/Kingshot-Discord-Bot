@@ -5,8 +5,11 @@ Ensures the repo root (so `import cogs.*` resolves) and this tests dir (so
 invoked from. Also skips suites whose target cog isn't present in the current
 checkout, so the run never hard-errors on a version that lacks a feature.
 """
+import sqlite3
 import sys
 from pathlib import Path
+
+import pytest
 
 _HERE = Path(__file__).resolve().parent
 _REPO = _HERE.parent
@@ -33,3 +36,23 @@ _REQUIRES = {
 for _test_file, _needed in _REQUIRES.items():
     if not (_REPO / _needed).exists():
         collect_ignore.append(_test_file)
+
+
+@pytest.fixture
+def make_templates_cog():
+    """Builds a NotificationTemplates cog on a fresh in-memory database."""
+    import importlib
+    templates = importlib.import_module("cogs.notification_templates")
+
+    def _build():
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE bear_notifications (id INTEGER PRIMARY KEY, event_type TEXT)")
+        conn.commit()
+
+        cog = templates.NotificationTemplates.__new__(templates.NotificationTemplates)
+        cog.conn = conn
+        cog.cursor = conn.cursor()
+        cog._setup_database()
+        return cog
+
+    return _build

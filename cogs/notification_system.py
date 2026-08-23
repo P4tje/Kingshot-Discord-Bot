@@ -339,6 +339,46 @@ class NotificationSystem(commands.Cog):
         """)
 
         self.conn.commit()
+        self._apply_instance_descriptions()
+
+    def _apply_instance_descriptions(self):
+        """One-time repair giving phase and legion embeds their own default text."""
+        from .notification_event_types import EVENT_CONFIG, get_instance_defaults
+
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notification_repairs (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT
+            )
+        """)
+        if self.cursor.execute("SELECT 1 FROM notification_repairs WHERE name = ?",
+                               ("instance_descriptions",)).fetchone():
+            return
+
+        updated = 0
+        for event_type, config in EVENT_CONFIG.items():
+            generic = config.get("description")
+            descriptions = get_instance_defaults(event_type)
+            if not generic:
+                continue
+            for instance_identifier, instance_description in descriptions.items():
+                self.cursor.execute("""
+                    UPDATE bear_notification_embeds
+                    SET description = ?
+                    WHERE description = ?
+                    AND notification_id IN (
+                        SELECT id FROM bear_notifications
+                        WHERE event_type = ? AND instance_identifier = ?
+                    )
+                """, (instance_description, generic, event_type, instance_identifier))
+                updated += self.cursor.rowcount
+
+        self.cursor.execute(
+            "INSERT INTO notification_repairs (name, applied_at) VALUES (?, ?)",
+            ("instance_descriptions", datetime.now().isoformat(timespec="seconds")))
+        self.conn.commit()
+        logger.info(f"Applied per-instance default descriptions to {updated} notification embeds")
+        print(f"Applied per-instance default descriptions to {updated} notification embeds")
 
     async def cog_load(self):
 
@@ -1121,17 +1161,6 @@ class NotificationSystem(commands.Cog):
                 # Format event date as "MMM DD" (e.g., "Nov 15")
                 event_date = event_datetime.strftime("%b %d")
 
-                # Check if event has instance-specific descriptions
-                actual_description = description
-                if event_type and instance_identifier and "EMBED_MESSAGE:" not in description:
-                    from .notification_event_types import get_event_config
-                    event_config = get_event_config(event_type)
-                    if event_config and "descriptions" in event_config:
-                        descriptions_dict = event_config["descriptions"]
-                        # instance_identifier could be "legion1", "legion2", "teleport_window", "battle_start", etc.
-                        if instance_identifier in descriptions_dict:
-                            actual_description = descriptions_dict[instance_identifier]
-
                 if "EMBED_MESSAGE:" in description:
                     try:
                         embed_data = await self.get_notification_embed(id)
@@ -1162,28 +1191,24 @@ class NotificationSystem(commands.Cog):
                                         title = title.replace("{tag}", mention_text)
                                     embed.title = title
 
-                                description = embed_data.get("description", "")
+                                embed_description = embed_data.get("description", "")
 
-                                # Override with instance-specific description if available
-                                if event_type and instance_identifier:
-                                    from .notification_event_types import get_event_config
-                                    event_config = get_event_config(event_type)
-                                    if event_config and "descriptions" in event_config:
-                                        descriptions_dict = event_config["descriptions"]
-                                        if instance_identifier in descriptions_dict:
-                                            description = descriptions_dict[instance_identifier]
+                                # Fall back to the instance default only when nothing is stored
+                                if not embed_description and event_type and instance_identifier:
+                                    from .notification_event_types import get_instance_defaults
+                                    embed_description = get_instance_defaults(event_type).get(instance_identifier)
 
-                                if description and isinstance(description, str):
-                                    description = description.replace("%t", time_text)
-                                    description = description.replace("{time}", time_text)
-                                    description = description.replace("%n", event_name)
-                                    description = description.replace("%e", event_time)
-                                    description = description.replace("%d", event_date)
-                                    description = description.replace("%i", event_emoji)
-                                    if "@tag" in description or "{tag}" in description:
-                                        description = description.replace("@tag", mention_text)
-                                        description = description.replace("{tag}", mention_text)
-                                    embed.description = description
+                                if embed_description and isinstance(embed_description, str):
+                                    embed_description = embed_description.replace("%t", time_text)
+                                    embed_description = embed_description.replace("{time}", time_text)
+                                    embed_description = embed_description.replace("%n", event_name)
+                                    embed_description = embed_description.replace("%e", event_time)
+                                    embed_description = embed_description.replace("%d", event_date)
+                                    embed_description = embed_description.replace("%i", event_emoji)
+                                    if "@tag" in embed_description or "{tag}" in embed_description:
+                                        embed_description = embed_description.replace("@tag", mention_text)
+                                        embed_description = embed_description.replace("{tag}", mention_text)
+                                    embed.description = embed_description
 
                                 image_url = embed_data.get("image_url", "")
                                 if image_url and isinstance(image_url,
@@ -2416,11 +2441,8 @@ class EventTypeSelectView(discord.ui.View):
                 # Get templates cog to fetch template defaults
                 templates_cog = self.cog.bot.get_cog("NotificationTemplates")
                 if templates_cog:
-                    # Get templates for this event type
-                    templates = templates_cog.get_templates_by_event_type(self.selected_event_type)
-                    if templates:
-                        # Get full template data using the first template's ID
-                        template_data = templates_cog.get_template(templates[0]["template_id"])
+                    # Sub-event rows are skipped; this flow configures a single notification
+                    template_data = templates_cog.get_event_template(self.selected_event_type)
 
             # Build default embed data
             if template_data:

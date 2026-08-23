@@ -51,6 +51,7 @@ EVENT_CONFIG = {
         "duration_minutes": 30,
         "schedule_type": "custom",  # Alliance-defined schedule
         "description": "The %e %n opens in %t. Get your buffs on and prepare your marches for the hunt!",
+        "instance_names": {"bt1": "Bear 1", "bt2": "Bear 2"},
         "default_notification_type": 2,  # 10, 5, 0 minutes before
         "time_slots": "5min",  # Can be scheduled in 5-minute increments
         "instances_per_cycle": 2,  # Trap 1 and 2
@@ -65,6 +66,7 @@ EVENT_CONFIG = {
         "reference_date": "2025-11-18",  # Reference occurrence date
         "cycle_weeks": 4,
         "description": "%n is coming to town in %t. Come online and join the defense!",
+        "instance_names": {"tuesday": "Tuesday", "thursday": "Thursday"},
         "default_notification_type": 2,
         "time_slots": "5min",
         "image_url": "",
@@ -83,6 +85,7 @@ EVENT_CONFIG = {
             "legion1": "%n Legion 1 at %e starts in %t. Buff up, heal up, recall your marches and get ready to fight!",
             "legion2": "%n Legion 2 at %e starts in %t. Buff up, heal up, recall your marches and get ready to fight!"
         },
+        "instance_names": {"legion1": "Legion 1", "legion2": "Legion 2"},
         "default_notification_type": 2,
         "instances_per_cycle": 2,  # Legion 1 and Legion 2
         "image_url": "",
@@ -101,6 +104,7 @@ EVENT_CONFIG = {
             "legion1": "%n Legion 1 at %e starts in %t. Buff up and get ready to fight!",
             "legion2": "%n Legion 2 at %e starts in %t. Buff up and get ready to fight!"
         },
+        "instance_names": {"legion1": "Legion 1", "legion2": "Legion 2"},
         "default_notification_type": 2,
         "instances_per_cycle": 2,
         "image_url": "",
@@ -143,6 +147,7 @@ EVENT_CONFIG = {
             "teleport_window": "%n teleport window opens in %t! Get ready to take your places.",
             "battle_start": "%n starts in %t. Get ready to fight!"
         },
+        "instance_names": {"teleport_window": "Teleport Window", "battle_start": "Battle Start"},
         "default_notification_type": 2,
         "image_url": "",
         "thumbnail_url": "https://i.imgur.com/i3RwgWT.png",
@@ -160,6 +165,11 @@ EVENT_CONFIG = {
             "borders_open": "Kingdom borders open in %t! Shield up or you could get raided!",
             "teleport_window": "%n teleport window opens in %t! Get ready to take your places.",
             "battle_start": "%n battle starts in %t. Get ready to battle and win this for the glory of our kingdom!"
+        },
+        "instance_names": {
+            "borders_open": "Borders Open",
+            "teleport_window": "Teleport Window",
+            "battle_start": "Battle Start"
         },
         "default_notification_type": 2,
         "image_url": "",
@@ -225,6 +235,34 @@ def get_event_icon(event_type: str) -> str:
         Emoji string or empty string if not found
     """
     return EVENT_TYPE_ICONS.get(event_type, "📅")
+
+def get_instance_display_name(event_type: str, instance_id: str) -> Optional[str]:
+    """
+    Get the human-readable label for a phase or legion of a multi-instance event
+
+    Args:
+        event_type: Name of the event type
+        instance_id: Instance identifier stored on the notification
+
+    Returns:
+        Label string, or None if the event has no named instances
+    """
+    if not event_type or not instance_id:
+        return None
+    config = get_event_config(event_type)
+    if not config:
+        return None
+    return config.get("instance_names", {}).get(instance_id)
+
+def get_instance_defaults(event_type: str) -> Dict[str, str]:
+    """Default description per sub-event, empty for events that have only one notification"""
+    config = get_event_config(event_type)
+    return (config or {}).get("descriptions") or {}
+
+def get_instance_labels(event_type: str) -> List[str]:
+    """Human-readable names of an event's sub-events, in configured order"""
+    return [get_instance_display_name(event_type, key) or key
+            for key in get_instance_defaults(event_type)]
 
 def validate_time_slot(time_str: str, slot_type: str = "5min") -> bool:
     """

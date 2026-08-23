@@ -8,6 +8,9 @@ and UTC- timezones silently suppressed legitimate repeats.
 Forbidden: losing send permission on a still-cached channel must route into
 the pause/DM quarantine machinery instead of retrying every 0.1s forever with
 no admin feedback.
+
+Embed description: the stored description is what gets sent. The per-instance
+default only fills in when nothing is stored.
 """
 import asyncio
 import importlib
@@ -19,6 +22,7 @@ import discord
 import pytz
 
 ns = importlib.import_module("cogs.notification_system")
+event_types = importlib.import_module("cogs.notification_event_types")
 
 
 def _forbidden():
@@ -54,6 +58,10 @@ def _mk_cog(channel):
         last_notification TEXT, next_notification TEXT, auto_disabled_at TEXT,
         description TEXT, guild_id INTEGER, event_type TEXT, hour INTEGER,
         minute INTEGER, timezone TEXT, channel_id INTEGER, channel_name TEXT)""")
+    conn.execute("""CREATE TABLE bear_notification_embeds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, notification_id INTEGER,
+        title TEXT, description TEXT, color INTEGER, image_url TEXT,
+        thumbnail_url TEXT, footer TEXT, author TEXT, mention_message TEXT)""")
     conn.commit()
 
     cog = ns.NotificationSystem.__new__(ns.NotificationSystem)
@@ -87,6 +95,49 @@ def _row(tz_name, minutes_ahead=30):
     #  instance_identifier, custom_delete_delay_minutes)
     return (1, 10, 20, 12, 0, tz_name, "Test event", 1, "none", 0, 0, 1,
             None, None, None, next_at, None, None, None)
+
+
+def _embed_row(event_type, instance_identifier):
+    row = list(_row("UTC"))
+    row[6] = f"EMBED_MESSAGE:{event_type} - {instance_identifier}"
+    row[16] = event_type
+    row[17] = instance_identifier
+    return tuple(row)
+
+
+def _store_embed(cog, description):
+    cog.cursor.execute("INSERT INTO bear_notifications (id) VALUES (1)")
+    cog.cursor.execute(
+        "INSERT INTO bear_notification_embeds (notification_id, title, description)"
+        " VALUES (1, 'KvK Notification', ?)", (description,))
+    cog.conn.commit()
+
+
+def test_edited_embed_description_survives_the_send():
+    chan = _Chan()
+    cog, _ = _mk_cog(chan)
+    _store_embed(cog, "Borders open, shield up before you log off!")
+
+    asyncio.run(cog.process_notification(_embed_row("KvK", "borders_open")))
+
+    sent = chan.sent[0]["embed"]
+    default = event_types.EVENT_CONFIG["KvK"]["descriptions"]["borders_open"]
+    assert sent.description == "Borders open, shield up before you log off!", \
+        "the admin's stored description must be what gets sent"
+    assert sent.description != default
+
+
+def test_empty_embed_description_falls_back_to_the_instance_default():
+    chan = _Chan()
+    cog, _ = _mk_cog(chan)
+    _store_embed(cog, "")
+
+    asyncio.run(cog.process_notification(_embed_row("KvK", "borders_open")))
+
+    sent = chan.sent[0]["embed"]
+    default_start = event_types.EVENT_CONFIG["KvK"]["descriptions"]["borders_open"].split("%t")[0]
+    assert sent.description.startswith(default_start), \
+        "an empty stored description must fall back to the per-instance default"
 
 
 def test_dedupe_suppresses_duplicate_in_non_utc_timezone():

@@ -11,7 +11,7 @@ import math
 import traceback
 import logging
 import asyncio
-from .notification_event_types import get_event_icon
+from .notification_event_types import get_event_icon, get_instance_display_name
 from .permission_handler import PermissionManager
 from .pimp_my_bot import theme, safe_edit_message
 
@@ -551,7 +551,8 @@ class NotificationSchedule(commands.Cog):
             # Query notifications based on board type
             query = """
                 SELECT id, channel_id, hour, minute, timezone, description,
-                       notification_type, next_notification, is_enabled, repeat_enabled, repeat_minutes, event_type
+                       notification_type, next_notification, is_enabled, repeat_enabled, repeat_minutes, event_type,
+                       instance_identifier
                 FROM bear_notifications
                 WHERE guild_id = ?
             """
@@ -603,7 +604,8 @@ class NotificationSchedule(commands.Cog):
 
             for notif in notifications:
                 (notif_id, channel_id, hour, minute, notif_timezone, description,
-                 notification_type, next_notification, is_enabled, repeat_enabled, repeat_minutes, event_type) = notif
+                 notification_type, next_notification, is_enabled, repeat_enabled, repeat_minutes, event_type,
+                 instance_identifier) = notif
 
                 next_time = datetime.fromisoformat(next_notification)
 
@@ -827,7 +829,8 @@ class NotificationSchedule(commands.Cog):
         """
         try:
             (notif_id, channel_id, hour, minute, notif_timezone, description,
-             notification_type, next_notification, is_enabled, repeat_enabled, repeat_minutes, event_type) = notification
+             notification_type, next_notification, is_enabled, repeat_enabled, repeat_minutes, event_type,
+             instance_identifier) = notification
 
             # Parse next notification time
             next_time = datetime.fromisoformat(next_notification)
@@ -882,6 +885,11 @@ class NotificationSchedule(commands.Cog):
             # Strip "Notification" suffix if present (for backwards compatibility)
             if name.endswith(" Notification"):
                 name = name[:-13]
+
+            # Tell phases and legions of the same event apart
+            instance_label = get_instance_display_name(event_type, instance_identifier)
+            if instance_label and instance_label.lower() not in name.lower():
+                name = f"{name} - {instance_label}"
 
             # Build line: **time** - emoji name (avoid duplicate emoji if name already starts with it)
             if name.startswith(emoji):

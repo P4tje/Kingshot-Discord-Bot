@@ -14,6 +14,7 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 from notification_event_types import (
     get_event_icon, get_event_config, calculate_next_occurrence, validate_time_slot,
+    get_instance_defaults, get_instance_display_name,
     calculate_viking_vengeance_dates, get_reference_override, set_reference_override
 )
 from .permission_handler import PermissionManager
@@ -2370,20 +2371,33 @@ class WizardPreviewView(discord.ui.View):
 
         await interaction.response.edit_message(embed=embed, view=self)
 
+    def _phase_description(self, event_name: str, phase: str) -> str | None:
+        """The phase template's description, falling back to the phase default in EVENT_CONFIG."""
+        templates_cog = self.cog.bot.get_cog("NotificationTemplates")
+        if templates_cog:
+            try:
+                template = templates_cog.get_event_template(event_name, phase)
+                if template and template.get("embed_description"):
+                    return template["embed_description"]
+            except Exception as e:
+                logger.error(f"Error loading {event_name} template for phase {phase}: {e}")
+                print(f"Error loading {event_name} template for phase {phase}: {e}")
+        return get_instance_defaults(event_name).get(phase)
+
+    def _phase_embed(self, event_name: str, embed_data: dict, phase: str) -> dict:
+        """Embed data with the phase's own description, or the original when the phase has none."""
+        phase_desc = self._phase_description(event_name, phase) if phase else None
+        if not phase_desc:
+            return embed_data
+        phase_embed = embed_data.copy()
+        phase_embed["description"] = phase_desc
+        return phase_embed
+
     def _get_instance_display_name(self, event_name: str, instance_id: str, hour: int = None, minute: int = None) -> str:
         """Convert instance_id to human-readable display name for completion message."""
-        display_map = {
-            "Bear Trap": {"bt1": "Bear 1", "bt2": "Bear 2"},
-            "Viking Vengeance": {"tuesday": "Tuesday", "thursday": "Thursday"},
-            "Swordland Showdown": {"legion1": "Legion 1", "legion2": "Legion 2"},
-            "Tri-Alliance Clash": {"legion1": "Legion 1", "legion2": "Legion 2"},
-            "Castle Battle": {"teleport_window": "Teleport Window", "battle_start": "Battle Start"},
-            "KvK": {"borders_open": "Borders Open", "teleport_window": "Teleport Window", "battle_start": "Battle Start"},
-        }
-
-        # Check if event has predefined display names
-        if event_name in display_map and instance_id in display_map[event_name]:
-            return display_map[event_name][instance_id]
+        label = get_instance_display_name(event_name, instance_id)
+        if label:
+            return label
 
         # Fortress Battle and Eternity's Reach use actual times as display
         if event_name in ["Fortress Battle", "Eternity's Reach"]:
@@ -2556,9 +2570,7 @@ class WizardPreviewView(discord.ui.View):
                 template_data = None
                 templates_cog = notification_cog.bot.get_cog("NotificationTemplates")
                 if templates_cog:
-                    templates = templates_cog.get_templates_by_event_type(event_name)
-                    if templates:
-                        template_data = templates_cog.get_template(templates[0]["template_id"])
+                    template_data = templates_cog.get_event_template(event_name)
 
                 # Prepare embed data
                 if template_data:
@@ -2666,7 +2678,8 @@ class WizardPreviewView(discord.ui.View):
                         c, u, _, action = await self._create_or_update_notification(
                             notification_cog, interaction, event_name, "legion1",
                             legion1_hour, legion1_minute, event_next_occurrence,
-                            repeat_minutes, description, embed_data
+                            repeat_minutes, description,
+                            self._phase_embed(event_name, embed_data, "legion1")
                         )
                         created_count += c
                         updated_count += u
@@ -2687,7 +2700,8 @@ class WizardPreviewView(discord.ui.View):
                         c, u, _, action = await self._create_or_update_notification(
                             notification_cog, interaction, event_name, "legion2",
                             legion2_hour, legion2_minute, event_next_occurrence,
-                            repeat_minutes, description, embed_data
+                            repeat_minutes, description,
+                            self._phase_embed(event_name, embed_data, "legion2")
                         )
                         created_count += c
                         updated_count += u
@@ -2712,7 +2726,8 @@ class WizardPreviewView(discord.ui.View):
                         c, u, _, action = await self._create_or_update_notification(
                             notification_cog, interaction, event_name, "legion1",
                             legion1_hour, legion1_minute, event_next_occurrence,
-                            repeat_minutes, description, embed_data
+                            repeat_minutes, description,
+                            self._phase_embed(event_name, embed_data, "legion1")
                         )
                         created_count += c
                         updated_count += u
@@ -2732,7 +2747,8 @@ class WizardPreviewView(discord.ui.View):
                         c, u, _, action = await self._create_or_update_notification(
                             notification_cog, interaction, event_name, "legion2",
                             legion2_hour, legion2_minute, event_next_occurrence,
-                            repeat_minutes, description, embed_data
+                            repeat_minutes, description,
+                            self._phase_embed(event_name, embed_data, "legion2")
                         )
                         created_count += c
                         updated_count += u
@@ -2759,13 +2775,10 @@ class WizardPreviewView(discord.ui.View):
                         processed_phases.add(phase)
 
                         if hour is not None:
-                            phase_description = description
-                            phase_embed = embed_data.copy()
-                            if phase and event_config.get("descriptions"):
-                                phase_desc = event_config["descriptions"].get(phase)
-                                if phase_desc:
-                                    phase_embed['description'] = phase_desc
-                                    phase_description = f"{description_prefix}{event_name} - {phase}"
+                            phase_embed = self._phase_embed(event_name, embed_data, phase)
+                            has_phase_default = phase in get_instance_defaults(event_name)
+                            phase_label = get_instance_display_name(event_name, phase) or phase
+                            phase_description = f"{description_prefix}{event_name} - {phase_label}" if has_phase_default else description
 
                             c, u, _, action = await self._create_or_update_notification(
                                 notification_cog, interaction, event_name, phase,
@@ -2803,13 +2816,10 @@ class WizardPreviewView(discord.ui.View):
                         processed_phases.add(phase)
 
                         if hour is not None:
-                            phase_description = description
-                            phase_embed = embed_data.copy()
-                            if phase and event_config.get("descriptions"):
-                                phase_desc = event_config["descriptions"].get(phase)
-                                if phase_desc:
-                                    phase_embed['description'] = phase_desc
-                                    phase_description = f"{description_prefix}{event_name} - {phase}"
+                            phase_embed = self._phase_embed(event_name, embed_data, phase)
+                            has_phase_default = phase in get_instance_defaults(event_name)
+                            phase_label = get_instance_display_name(event_name, phase) or phase
+                            phase_description = f"{description_prefix}{event_name} - {phase_label}" if has_phase_default else description
 
                             c, u, _, action = await self._create_or_update_notification(
                                 notification_cog, interaction, event_name, phase,
@@ -2819,7 +2829,7 @@ class WizardPreviewView(discord.ui.View):
                             created_count += c
                             updated_count += u
                             if action != "updated":
-                                # Frostfire uses times, Castle/SvS use phase names
+                                # Eternity's Reach uses times, Castle/KvK use phase names
                                 display = self._get_instance_display_name(event_name, phase, hour, minute)
                                 event_changes.setdefault(event_name, []).append((display, action))
 

@@ -12,11 +12,51 @@ from typing import Optional, Dict, List
 # Import event type configuration
 import sys
 sys.path.insert(0, os.path.dirname(__file__))
-from notification_event_types import EVENT_CONFIG, get_event_icon, get_event_config
+from notification_event_types import (
+    EVENT_CONFIG, get_event_icon, get_event_config, get_instance_display_name,
+    get_instance_defaults, get_instance_labels
+)
 from .pimp_my_bot import theme
 from .permission_handler import PermissionManager
 
 logger = logging.getLogger('notification')
+
+
+def build_instance_template_name(event_type: str, instance_id: str) -> str:
+    """Template row name for a sub-event, e.g. 'SvS - Battle Start'"""
+    return f"{event_type} - {get_instance_display_name(event_type, instance_id) or instance_id}"
+
+
+def build_default_embed_title(config: Dict) -> str:
+    """Title format, including the time placeholder when the event has variable times"""
+    has_variable_times = (
+        config.get("available_times") or
+        config.get("time_slots") or
+        config.get("instances_per_cycle", 0) > 1
+    )
+    return "%i %e %n" if has_variable_times else "%i %n"
+
+
+def build_default_repeat_config(event_name: str, config: Dict) -> str:
+    """JSON repeat settings derived from the event's schedule type"""
+    schedule_type = config.get("schedule_type")
+
+    if schedule_type == "daily":
+        repeat_config = {"type": "interval", "minutes": 1440}
+    elif schedule_type == "global_weekly":
+        repeat_config = {"type": "fixed_days", "days": [4]}
+    elif schedule_type == "global_biweekly":
+        if event_name == "Viking Vengeance":
+            repeat_config = {"type": "custom"}
+        else:
+            repeat_config = {"type": "interval", "minutes": 20160}
+    elif schedule_type in ["global_monthly", "global_4weekly", "global_4weekly_alt"]:
+        repeat_config = {"type": "interval", "minutes": 40320}
+    else:
+        repeat_config = {"type": "custom"}
+
+    return json.dumps(repeat_config)
+
 
 class NotificationTemplates(commands.Cog):
     def __init__(self, bot):
@@ -32,7 +72,10 @@ class NotificationTemplates(commands.Cog):
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.commit()
 
-        # Create templates table
+        self._setup_database()
+
+    def _setup_database(self):
+        """Create the templates table, run migrations, then seed and sync default rows"""
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS notification_templates (
                 template_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,10 +100,16 @@ class NotificationTemplates(commands.Cog):
         # Migrate: Add mention_message, footer, and author columns if they don't exist
         self._migrate_add_embed_text_fields()
 
+        # Migrate: Add instance_identifier column for sub-event template rows
+        self._migrate_add_instance_identifier()
+
         # Populate pre-built templates if none exist
         self.cursor.execute("SELECT COUNT(*) FROM notification_templates WHERE is_global = 1")
         if self.cursor.fetchone()[0] == 0:
             self._populate_default_templates()
+
+        # Seed one row per sub-event, including on installs that already have templates
+        self._ensure_instance_templates()
 
         # Always sync non-customized templates with latest defaults from notification_event_types.py
         self._sync_default_templates()
@@ -82,6 +131,58 @@ class NotificationTemplates(commands.Cog):
             self.cursor.execute("ALTER TABLE notification_templates ADD COLUMN footer TEXT")
             self.cursor.execute("ALTER TABLE notification_templates ADD COLUMN author TEXT")
             self.conn.commit()
+
+    def _migrate_add_instance_identifier(self):
+        """Add the instance_identifier column that marks a row as one event's sub-event"""
+        self.cursor.execute("PRAGMA table_info(notification_templates)")
+        columns = [column[1] for column in self.cursor.fetchall()]
+
+        if 'instance_identifier' not in columns:
+            self.cursor.execute("ALTER TABLE notification_templates ADD COLUMN instance_identifier TEXT")
+            self.conn.commit()
+            logger.info("Added instance_identifier column to notification_templates")
+            print("Added instance_identifier column to notification_templates")
+
+    def _ensure_instance_templates(self):
+        """Create one editable template row per sub-event, skipping any that already exist"""
+        created = 0
+
+        for event_name, config in EVENT_CONFIG.items():
+            embed_title = build_default_embed_title(config)
+            repeat_config = build_default_repeat_config(event_name, config)
+
+            for instance_id, description in get_instance_defaults(event_name).items():
+                self.cursor.execute("""
+                    INSERT INTO notification_templates
+                    (template_name, event_type, instance_identifier, description, notification_type,
+                     embed_title, embed_description, embed_color, embed_image_url,
+                     embed_thumbnail_url, repeat_config, is_global, created_by)
+                    SELECT ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 1, NULL
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM notification_templates
+                        WHERE event_type = ? AND instance_identifier = ?
+                    )
+                """, (
+                    build_instance_template_name(event_name, instance_id),
+                    event_name,
+                    instance_id,
+                    config.get("default_notification_type", 1),
+                    embed_title,
+                    description,
+                    "3447003",
+                    config.get("image_url", ""),
+                    config.get("thumbnail_url", ""),
+                    repeat_config,
+                    event_name,
+                    instance_id
+                ))
+                created += self.cursor.rowcount
+
+        self.conn.commit()
+
+        if created:
+            logger.info(f"Created {created} sub-event notification templates")
+            print(f"Created {created} sub-event notification templates")
 
     def _sync_default_templates(self):
         """Sync non-customized templates with latest values from notification_event_types.py"""
@@ -113,8 +214,16 @@ class NotificationTemplates(commands.Cog):
             self.cursor.execute("""
                 UPDATE notification_templates
                 SET embed_image_url = ?, embed_thumbnail_url = ?, embed_description = ?
-                WHERE event_type = ? AND is_global = 1
+                WHERE event_type = ? AND is_global = 1 AND instance_identifier IS NULL
             """, (image_url, thumbnail_url, description, event_name))
+
+            # Sub-event rows keep their own default wording
+            for instance_id, instance_description in get_instance_defaults(event_name).items():
+                self.cursor.execute("""
+                    UPDATE notification_templates
+                    SET embed_image_url = ?, embed_thumbnail_url = ?, embed_description = ?
+                    WHERE event_type = ? AND is_global = 1 AND instance_identifier = ?
+                """, (image_url, thumbnail_url, instance_description, event_name, instance_id))
 
         self.conn.commit()
 
@@ -123,50 +232,22 @@ class NotificationTemplates(commands.Cog):
         templates = []
 
         for event_name, config in EVENT_CONFIG.items():
-            emoji = config.get("emoji", "📅")
             description = config.get("description", "")
             image_url = config.get("image_url", "")
             thumbnail_url = config.get("thumbnail_url", "")
             notification_type = config.get("default_notification_type", 1)
-            embed_desc = description
-
-            # Create embed title - only include time if event has variable times
-            has_variable_times = (
-                config.get("available_times") or  # Multiple time slots to choose from
-                config.get("time_slots") or       # Custom scheduling (like Bear Trap)
-                config.get("instances_per_cycle", 0) > 1
-            )
-            embed_title = f"%i %e %n" if has_variable_times else f"%i %n"
-
-            # Repeat configuration based on event schedule type
-            repeat_config = {}
-            schedule_type = config.get("schedule_type")
-
-            if schedule_type == "daily":
-                repeat_config = {"type": "interval", "minutes": 1440}  # Daily
-            elif schedule_type == "global_weekly":
-                repeat_config = {"type": "fixed_days", "days": [4]}  # Friday
-            elif schedule_type == "global_biweekly":
-                if event_name == "Viking Vengeance":
-                    repeat_config = {"type": "custom"}  # Will be set by wizard
-                else:
-                    repeat_config = {"type": "interval", "minutes": 20160}  # 2 weeks
-            elif schedule_type in ["global_monthly", "global_4weekly", "global_4weekly_alt"]:
-                repeat_config = {"type": "interval", "minutes": 40320}  # 4 weeks
-            else:
-                repeat_config = {"type": "custom"}
 
             templates.append({
                 "template_name": event_name,
                 "event_type": event_name,
                 "description": "",  # Will be generated dynamically when displaying
                 "notification_type": notification_type,
-                "embed_title": embed_title,
-                "embed_description": embed_desc,
+                "embed_title": build_default_embed_title(config),
+                "embed_description": description,
                 "embed_color": "3447003",  # Discord blue
                 "embed_image_url": image_url,
                 "embed_thumbnail_url": thumbnail_url,
-                "repeat_config": json.dumps(repeat_config),
+                "repeat_config": build_default_repeat_config(event_name, config),
                 "is_global": 1,
                 "created_by": None
             })
@@ -212,7 +293,7 @@ class NotificationTemplates(commands.Cog):
             SELECT template_id, template_name, event_type, description, notification_type,
                    default_times, embed_title, embed_description, embed_color,
                    embed_image_url, embed_thumbnail_url, repeat_config, is_global, created_by,
-                   mention_message, footer, author
+                   mention_message, footer, author, instance_identifier
             FROM notification_templates
             WHERE template_id = ?
         """, (template_id,))
@@ -238,8 +319,38 @@ class NotificationTemplates(commands.Cog):
             "created_by": row[13],
             "mention_message": row[14],
             "footer": row[15],
-            "author": row[16]
+            "author": row[16],
+            "instance_identifier": row[17]
         }
+
+    def get_event_template(self, event_type: str, instance_identifier: Optional[str] = None) -> Optional[Dict]:
+        """Get an event's own template row, or the row for one of its sub-events"""
+        if instance_identifier:
+            self.cursor.execute("""
+                SELECT template_id FROM notification_templates
+                WHERE event_type = ? AND instance_identifier = ?
+            """, (event_type, instance_identifier))
+        else:
+            self.cursor.execute("""
+                SELECT template_id FROM notification_templates
+                WHERE event_type = ? AND instance_identifier IS NULL
+                ORDER BY template_id ASC
+            """, (event_type,))
+
+        row = self.cursor.fetchone()
+        return self.get_template(row[0]) if row else None
+
+    def apply_description_to_instances(self, event_type: str, embed_description: str,
+                                       user_id: int = None) -> int:
+        """Copy one description onto every sub-event template of an event, returning the row count"""
+        self.cursor.execute("""
+            UPDATE notification_templates
+            SET embed_description = ?, is_global = 0, created_by = COALESCE(created_by, ?)
+            WHERE event_type = ? AND instance_identifier IS NOT NULL
+        """, (embed_description, user_id, event_type))
+        updated = self.cursor.rowcount
+        self.conn.commit()
+        return updated
 
     def update_template(self, template_id: int, embed_title: str, embed_description: str,
                        embed_image_url: str, embed_thumbnail_url: str, mention_message: str = None,
@@ -270,17 +381,17 @@ class NotificationTemplates(commands.Cog):
         if not config:
             return False
 
-        image_url = config.get("image_url", "")
-        thumbnail_url = config.get("thumbnail_url", "")
-        description = config.get("description", "")
+        existing = self.get_template(template_id)
+        instance_id = existing.get("instance_identifier") if existing else None
 
-        # Determine title format based on event type
-        has_variable_times = (
-            config.get("available_times") or
-            config.get("time_slots") or
-            config.get("instances_per_cycle", 0) > 1
-        )
-        embed_title = "%i %e %n" if has_variable_times else "%i %n"
+        if instance_id:
+            description = get_instance_defaults(event_type).get(instance_id)
+            if description is None:
+                return False
+            template_name = build_instance_template_name(event_type, instance_id)
+        else:
+            description = config.get("description", "")
+            template_name = event_type
 
         self.cursor.execute("""
             UPDATE notification_templates
@@ -288,7 +399,8 @@ class NotificationTemplates(commands.Cog):
                 embed_title = ?, mention_message = NULL, footer = NULL, author = NULL,
                 is_global = 1, event_type = ?, template_name = ?
             WHERE template_id = ?
-        """, (image_url, thumbnail_url, description, embed_title, event_type, event_type, template_id))
+        """, (config.get("image_url", ""), config.get("thumbnail_url", ""), description,
+              build_default_embed_title(config), event_type, template_name, template_id))
         self.conn.commit()
         return True
 
@@ -297,17 +409,17 @@ class NotificationTemplates(commands.Cog):
         if event_type:
             self.cursor.execute("""
                 SELECT template_id, template_name, event_type, description, notification_type,
-                       embed_title, embed_description, is_global, created_by
+                       embed_title, embed_description, is_global, created_by, instance_identifier
                 FROM notification_templates
                 WHERE event_type = ?
-                ORDER BY is_global DESC, template_name ASC
+                ORDER BY instance_identifier IS NOT NULL, template_name ASC
             """, (event_type,))
         else:
             self.cursor.execute("""
                 SELECT template_id, template_name, event_type, description, notification_type,
-                       embed_title, embed_description, is_global, created_by
+                       embed_title, embed_description, is_global, created_by, instance_identifier
                 FROM notification_templates
-                ORDER BY is_global DESC, event_type ASC, template_name ASC
+                ORDER BY event_type ASC, instance_identifier IS NOT NULL, template_name ASC
             """)
 
         results = []
@@ -321,7 +433,8 @@ class NotificationTemplates(commands.Cog):
                 "embed_title": row[5],
                 "embed_description": row[6],
                 "is_global": row[7],
-                "created_by": row[8]
+                "created_by": row[8],
+                "instance_identifier": row[9]
             })
         return results
 
@@ -519,15 +632,17 @@ class TemplateEditModal(discord.ui.Modal, title="Edit Template"):
 
             # Refresh the template data
             updated_template = self.cog.get_template(self.template["template_id"])
-            if updated_template:
-                # Show updated preview
-                view = TemplatePreviewView(self.cog, updated_template)
-                await view.show_preview(interaction)
-            else:
+            if not updated_template:
                 await interaction.response.send_message(
                     f"{theme.deniedIcon} Failed to refresh template preview",
                     ephemeral=True
                 )
+                return
+
+            # Show updated preview
+            view = TemplatePreviewView(self.cog, updated_template)
+            await view.show_preview(interaction)
+            await self._offer_apply_to_sub_events(interaction, updated_template)
         except Exception as e:
             logger.error(f"Error updating template: {e}")
             print(f"Error updating template: {e}")
@@ -535,6 +650,93 @@ class TemplateEditModal(discord.ui.Modal, title="Edit Template"):
                 f"{theme.deniedIcon} Failed to update template: {str(e)}",
                 ephemeral=True
             )
+
+    async def _offer_apply_to_sub_events(self, interaction: discord.Interaction, template: Dict):
+        """Ask whether the saved description should replace every sub-event's own wording"""
+        if template.get("instance_identifier"):
+            return
+
+        labels = get_instance_labels(template["event_type"])
+        if not labels:
+            return
+
+        event_name = template["event_type"]
+        embed = discord.Embed(
+            title=f"{theme.warnIcon} Use this text for every part of the event?",
+            description=(
+                f"**{event_name}** sends a separate notification for each part of the event: "
+                f"{', '.join(labels)}. Each part has its own wording, so the description you just "
+                "saved does not reach them yet.\n\n"
+                f"{theme.verifiedIcon} **Use for all parts** gives all of them the description you "
+                "just saved.\n"
+                f"{theme.prevIcon} **Keep their own wording** changes nothing else, and you can still "
+                "edit each part on its own from the template list.\n\n"
+                "Only the description is copied. Titles, images and mentions stay as they are."
+            ),
+            color=theme.emColor1
+        )
+
+        try:
+            await interaction.followup.send(
+                embed=embed,
+                view=ApplyDescriptionView(self.cog, template, labels),
+                ephemeral=True
+            )
+        except Exception as e:
+            logger.error(f"Error offering sub-event apply for {event_name}: {e}")
+            print(f"Error offering sub-event apply for {event_name}: {e}")
+
+class ApplyDescriptionView(discord.ui.View):
+    """Confirmation for copying a template's description onto its sub-event templates"""
+
+    def __init__(self, cog: NotificationTemplates, template: Dict, labels: List[str]):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.template = template
+        self.labels = labels
+
+    @discord.ui.button(label="Use for all parts", emoji=f"{theme.verifiedIcon}",
+                       style=discord.ButtonStyle.primary)
+    async def confirm_apply(self, interaction: discord.Interaction, button: discord.ui.Button):
+        event_name = self.template["event_type"]
+        try:
+            updated = self.cog.apply_description_to_instances(
+                event_name,
+                self.template["embed_description"],
+                interaction.user.id
+            )
+        except Exception as e:
+            logger.error(f"Error applying description to sub-events of {event_name}: {e}")
+            print(f"Error applying description to sub-events of {event_name}: {e}")
+            await interaction.response.edit_message(
+                content=None,
+                embed=discord.Embed(
+                    title=f"{theme.deniedIcon} Could not update the other parts",
+                    description=f"Nothing was changed. The error was: {e}",
+                    color=theme.emColor3
+                ),
+                view=None
+            )
+            self.stop()
+            return
+
+        await interaction.response.edit_message(
+            content=None,
+            embed=discord.Embed(
+                title=f"{theme.verifiedIcon} All {updated} parts updated",
+                description=f"{', '.join(self.labels)} now use the same description as **{event_name}**.",
+                color=theme.emColor1
+            ),
+            view=None
+        )
+        self.stop()
+
+    @discord.ui.button(label="Keep their own wording", emoji=f"{theme.prevIcon}",
+                       style=discord.ButtonStyle.secondary)
+    async def cancel_apply(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.delete_original_response()
+        self.stop()
 
 class TemplatePreviewView(discord.ui.View):
     def __init__(self, cog: NotificationTemplates, template: Dict, all_templates: List[Dict] = None):
