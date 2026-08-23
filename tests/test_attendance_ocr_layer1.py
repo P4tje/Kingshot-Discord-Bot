@@ -1114,3 +1114,11 @@ def test_dedup_drops_ocr_noise_prefix():
 
 def test_dedup_keeps_distinct_values():
     assert _dedup([("Alpha", 1), ("Beta", 2)]) == ["Alpha", "Beta"]
+
+
+def test_bear_trap_label_renders_each_slot():
+    # Slot 3/4 are extra/farm traps now, not a "Both" combined label.
+    assert parsers._bear_trap_label(1) == "Trap 1"
+    assert parsers._bear_trap_label(2) == "Trap 2"
+    assert parsers._bear_trap_label(3) == "Trap 3"
+    assert parsers._bear_trap_label(4) == "Trap 4"

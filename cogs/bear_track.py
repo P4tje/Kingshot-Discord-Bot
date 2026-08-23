@@ -214,10 +214,69 @@ def init_bear_database():
                 PRIMARY KEY (alliance_id, ocr_key)
             )
         """)
+        # Optional farm/academy alliance whose roster is a fallback match pool for
+        # the main alliance's bear OCR (farm-time trap accounts roll up to main).
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bear_farm_link (
+                main_alliance_id INTEGER PRIMARY KEY,
+                farm_alliance_id INTEGER NOT NULL
+            )
+        """)
         conn.commit()
 
 
 init_bear_database()
+
+
+def alliance_trap_slots(alliance_id: int) -> list[int]:
+    """Distinct trap slots that have saved hunts for this alliance, ascending."""
+    if not alliance_id:
+        return []
+    with closing(sqlite3.connect(BEAR_DB_PATH, timeout=30.0)) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT hunting_trap FROM bear_hunts WHERE alliance_id=? ORDER BY hunting_trap",
+            (alliance_id,),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def player_trap_slots(alliance_id: int, fid: int) -> list[int]:
+    """Distinct trap slots this player has damage rows in, ascending."""
+    with closing(sqlite3.connect(BEAR_DB_PATH, timeout=30.0)) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT h.hunting_trap FROM bear_hunts h "
+            "JOIN bear_player_damage bpd ON bpd.hunt_id=h.id "
+            "WHERE h.alliance_id=? AND bpd.fid=? ORDER BY h.hunting_trap",
+            (alliance_id, fid),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def get_farm_link(main_alliance_id: int) -> int | None:
+    """The farm alliance linked to this main alliance for bear matching, or None.
+    A dangling link (farm since deleted) simply yields an empty fallback roster."""
+    if not main_alliance_id:
+        return None
+    with closing(sqlite3.connect(BEAR_DB_PATH, timeout=30.0)) as conn:
+        row = conn.execute(
+            "SELECT farm_alliance_id FROM bear_farm_link WHERE main_alliance_id=?",
+            (main_alliance_id,),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def set_farm_link(main_alliance_id: int, farm_alliance_id: int) -> None:
+    with closing(sqlite3.connect(BEAR_DB_PATH, timeout=30.0)) as conn, conn:
+        conn.execute(
+            "INSERT INTO bear_farm_link (main_alliance_id, farm_alliance_id) VALUES (?, ?) "
+            "ON CONFLICT(main_alliance_id) DO UPDATE SET farm_alliance_id=excluded.farm_alliance_id",
+            (main_alliance_id, farm_alliance_id),
+        )
+
+
+def clear_farm_link(main_alliance_id: int) -> None:
+    with closing(sqlite3.connect(BEAR_DB_PATH, timeout=30.0)) as conn, conn:
+        conn.execute("DELETE FROM bear_farm_link WHERE main_alliance_id=?", (main_alliance_id,))
 
 
 _OCR_DIGIT_MAP = {
@@ -515,6 +574,10 @@ MATCH_AMBIGUOUS_DELTA = 5
 MATCH_HISTORY_PENALTY = 15  # subtracted from scores for opt-in historical names
 MATCH_ALIAS_SCORE = 100      # confidence given to a learned-alias hit (admin-taught)
 MATCH_ALIAS_FUZZY_MIN = 92   # min similarity to reuse a stored alias key when OCR drifts
+
+# Logical trap slots. In-game there are only traps 1-2 (all OCR reads 1 or 2);
+# slots 3-4 are admin-assigned for extra/farm-time traps.
+MAX_TRAPS = 4
 
 
 # Default initialised above (DEFAULT_OCR_LANG) before RapidOCR import.
@@ -1668,10 +1731,10 @@ def validate_bear_submission(date_str, hunting_trap, rallies, total_damage):
 
     try:
         hunting_trap = int(hunting_trap)
-        if hunting_trap not in (1, 2):
-            errors.append("Hunting trap must be 1 or 2.")
+        if not 1 <= hunting_trap <= MAX_TRAPS:
+            errors.append(f"Hunting trap must be 1-{MAX_TRAPS}.")
     except Exception:
-        errors.append("Hunting trap must be a number (1 or 2).")
+        errors.append(f"Hunting trap must be a number (1-{MAX_TRAPS}).")
 
     try:
         rallies = int(rallies)
@@ -2367,7 +2430,7 @@ def bear_data_embed_combined(
     """Combined-trap embed: `trap_series` is a list of
     `(trap_number, dates, rallies_list, total_damages)` for each trap that
     had data in the range. Renders a 2-line chart with a legend."""
-    title = f"{alliance_name} Both Traps"
+    title = f"{alliance_name} All Traps"
     if title_suffix:
         title += f" - {title_suffix}"
 
@@ -2404,7 +2467,7 @@ def bear_data_embed_combined(
     ]
     image_file = _render_damage_chart(
         None, None,
-        title=f"{alliance_name} Total Damage Over Time — Both Traps",
+        title=f"{alliance_name} Total Damage Over Time - All Traps",
         ylabel="Total Damage",
         series=series,
     )
@@ -2481,6 +2544,18 @@ def _render_damage_chart(dates, values, *, title, ylabel="Damage", series=None):
     finally:
         if fig is not None:
             plt.close(fig)
+
+
+def _warm_matplotlib():
+    """One-time throwaway render at startup so the first real chart click doesn't
+    pay matplotlib's import + font-cache cost in-thread (GIL-held), which can stall
+    the loop past Discord's 3s ack window and show 'interaction failed'."""
+    if not MATPLOTLIB_AVAILABLE:
+        return
+    try:
+        _render_damage_chart([datetime(2020, 1, 1)], [0], title="warmup")
+    except Exception as e:
+        logger.warning(f"Bear chart warmup failed: {e}")
 
 
 def bear_player_history_embed(*, alliance_name: str, fid: int, nickname: str,
@@ -3052,8 +3127,8 @@ class BearTrack(commands.Cog):
 
     async def hunting_trap_autocomplete(self, interaction: discord.Interaction, current: str):
         return [
-            discord.app_commands.Choice(name="1", value=1),
-            discord.app_commands.Choice(name="2", value=2),
+            discord.app_commands.Choice(name=str(n), value=n)
+            for n in range(1, MAX_TRAPS + 1)
         ]
 
     async def player_autocomplete(self, interaction: discord.Interaction, current: str):
@@ -3091,6 +3166,8 @@ class BearTrack(commands.Cog):
         if self._resume_done:
             return
         self._resume_done = True
+        # Warm matplotlib off-thread once so the first chart click doesn't stall.
+        self._mpl_warmup_task = asyncio.create_task(asyncio.to_thread(_warm_matplotlib))
         from . import ocr_resume
         for key, payload in ocr_resume.load_all('bear'):
             try:
@@ -3444,7 +3521,7 @@ class BearTrack(commands.Cog):
     @app_commands.autocomplete(alliance=alliance_autocomplete, hunting_trap=hunting_trap_autocomplete)
     @app_commands.describe(
         alliance="Alliance name",
-        hunting_trap="Hunting trap number (1 or 2)",
+        hunting_trap="Trap slot 1-4 (screenshots show 1-2; use 3-4 for extra/farm-time traps)",
         rallies="Number of rallies (optional; can be set in the editor)",
         total_damage="Total alliance damage (optional; can be set in the editor)",
         date="UTC date (YYYY-MM-DD). Defaults to today."
@@ -3464,9 +3541,9 @@ class BearTrack(commands.Cog):
         if not allowed:
             return
 
-        if hunting_trap not in (1, 2):
+        if not 1 <= hunting_trap <= MAX_TRAPS:
             await interaction.response.send_message(
-                f"{theme.deniedIcon} Hunting trap must be 1 or 2.", ephemeral=True
+                f"{theme.deniedIcon} Trap slot must be 1-{MAX_TRAPS}.", ephemeral=True
             )
             return
 
@@ -3701,6 +3778,8 @@ class BearTrack(commands.Cog):
                     f"└ Damage charts, top players, and per-hunt player breakdowns\n\n"
                     f"{theme.editListIcon} **Bear Channel Setup**\n"
                     f"└ Pick the channel, keywords, OCR engines and chart range\n\n"
+                    f"{theme.membersIcon} **Farm Alliance**\n"
+                    f"└ Link a farm/academy ally so its accounts match and roll up to the main ally\n\n"
                     f"{theme.settingsIcon} **Settings**\n"
                     f"└ Session timeout, auto-delete, and permissions\n"
                     f"{theme.lowerDivider}"
@@ -3856,11 +3935,38 @@ class BearHuntReviewView(discord.ui.View):
         self.page = 0
         self._tracker_resolved = False
 
+        # Optional farm/academy roster: a fallback match pool for names the main
+        # roster misses (main always wins). Empty when no farm is linked.
+        self.farm_alliance_id = get_farm_link(alliance_id)
+        self.farm_roster = (self.cog.get_match_roster(self.farm_alliance_id)
+                            if self.farm_alliance_id else [])
+
+        # Keep the raw OCR rows so re-targeting the slot can re-derive cleanly
+        # (a bumped slot must not carry the other slot's merged-in players).
+        self._ocr_rows = list(rows)
         self.rows = [self._enrich_row(r)
                      for r in self._merge_existing_rows(rows, existing_rows or [])]
         self._resolve_unique_assignments()
         self._sort_rows()
         self._build_components()
+
+    def _recheck_existing(self):
+        """Refresh the edit-in-place target for the current date+slot (banner + save)."""
+        self.existing_hunt_id, _ = self.data_submit._load_existing_hunt(
+            self.alliance_id, self.hunt_meta['date'], self.hunt_meta['hunting_trap'])
+
+    def _apply_slot_change(self, new_slot):
+        """Re-target to a different logical slot: re-check the existing hunt for
+        the new slot and re-derive rows from the raw OCR rows, so bumping an
+        OCR-default of 1 to a farm slot 3 can't overwrite trap 1 or drag its
+        players along."""
+        self.hunt_meta['hunting_trap'] = new_slot
+        existing_hunt_id, existing_rows = self.data_submit._load_existing_hunt(
+            self.alliance_id, self.hunt_meta['date'], new_slot)
+        self.existing_hunt_id = existing_hunt_id
+        self.rows = [self._enrich_row(r)
+                     for r in self._merge_existing_rows(self._ocr_rows, existing_rows or [])]
+        self.page = 0
 
     async def _notify_tracker_submit(self):
         # Cleanup must never break submit UX.
@@ -3894,6 +4000,7 @@ class BearHuntReviewView(discord.ui.View):
             'nickname': nickname,
             'candidates': candidates,
             'status': status,
+            'matched_source': None,
         }
 
     def _merge_existing_rows(self, new_rows, old_rows):
@@ -3946,6 +4053,7 @@ class BearHuntReviewView(discord.ui.View):
                 row['nickname'] = None
                 row['status'] = 'none'
                 row['match_score'] = None
+                row['matched_source'] = None
 
         candidates = []
         for row_idx, row in enumerate(self.rows):
@@ -3984,6 +4092,36 @@ class BearHuntReviewView(discord.ui.View):
             row['match_score'] = score
             assigned_fids.add(fid)
 
+        self._resolve_farm_fallback(assigned_fids)
+
+    def _resolve_farm_fallback(self, assigned_fids):
+        """Second matching tier: rows the main roster left unmatched get one pass
+        over the linked farm roster. Main always wins (only fid-less rows are
+        eligible); farm fids are disjoint from main so there's no cross-pool
+        conflict. Matches are tagged 'farm' and roll up to the main hunt."""
+        if not self.farm_roster:
+            return
+        pending = []
+        for idx, row in enumerate(self.rows):
+            if row.get('fid') is not None or row.get('status') == 'manual':
+                continue
+            cands = resolve_against_roster(
+                row.get('name') or '', self.farm_roster, self.farm_alliance_id)
+            for fid, nick, score in cands:
+                if score >= MATCH_LIKELY_MIN:
+                    pending.append((score, idx, fid, nick))
+        pending.sort(key=lambda c: (-c[0], c[1]))
+        for score, idx, fid, nick in pending:
+            row = self.rows[idx]
+            if row.get('fid') is not None or fid in assigned_fids:
+                continue
+            row['fid'] = fid
+            row['nickname'] = nick
+            row['status'] = 'auto' if score >= MATCH_AUTO_CONFIRM else 'likely'
+            row['match_score'] = score
+            row['matched_source'] = 'farm'
+            assigned_fids.add(fid)
+
     def _sort_rows(self):
         self.rows.sort(
             key=lambda r: (r['rank'] if r['rank'] is not None else 999, -r['damage'])
@@ -4006,10 +4144,11 @@ class BearHuntReviewView(discord.ui.View):
         parts = []
         if self.existing_hunt_id is not None:
             parts.append(
-                f"{theme.editListIcon} **Editing this alliance's existing Trap "
+                f"{theme.warnIcon} **Editing this alliance's existing Trap "
                 f"{self.hunt_meta.get('hunting_trap')} hunt for {self.hunt_meta.get('date')}.** "
                 f"Submitting overwrites that record; matches from the previous "
-                f"submission are kept where the new screenshots came up blank."
+                f"submission are kept where the new screenshots came up blank. "
+                f"If this is a different (e.g. farm-time) trap, change the trap slot above first."
             )
         unreadable_rows = sum(
             1 for r in self.rows
@@ -4105,6 +4244,8 @@ class BearHuntReviewView(discord.ui.View):
                 else:
                     name = r['name'] or "unreadable"
                     player = f"`{_isolate_rtl(name)}` — no match"
+            if r.get('matched_source') == 'farm' and r.get('fid'):
+                player += " · farm"
             lines.append(_ltr_line(f"{rank_str} {icon} {player} — `{format_damage_for_embed(r['damage'])}`"))
 
         total_pages = self._total_pages()
@@ -4129,6 +4270,19 @@ class BearHuntReviewView(discord.ui.View):
     def _build_components(self):
         self.clear_items()
 
+        # Prominent trap-slot selector (row 0). Screenshots only read 1-2; the
+        # admin files a farm/alt-time trap into slot 3-4 here.
+        cur_slot = self.hunt_meta.get('hunting_trap')
+        slot_options = []
+        for s in range(1, MAX_TRAPS + 1):
+            tail = "" if s <= 2 else " (farm)"
+            slot_options.append(discord.SelectOption(
+                label=f"Trap {s}{tail}", value=str(s), default=(s == cur_slot)))
+        slot_select = discord.ui.Select(
+            placeholder="Trap slot…", options=slot_options, row=0)
+        slot_select.callback = self._on_slot_selected
+        self.add_item(slot_select)
+
         if self.rows:
             start = self.page * self.ROWS_PER_PAGE
             end = min(start + self.ROWS_PER_PAGE, len(self.rows))
@@ -4139,12 +4293,14 @@ class BearHuntReviewView(discord.ui.View):
                 fid_part = f" · {r['fid']}" if r.get('fid') else ""
                 label = _ltr_line(f"{rank_part} {name_part}{fid_part}")[:100]
                 status_label = _STATUS_LABELS.get(r['status'], r['status'])
+                if r.get('matched_source') == 'farm' and r.get('fid'):
+                    status_label += " · farm"
                 desc = f"{format_damage_for_embed(r['damage'])} · {status_label}"[:100]
                 options.append(discord.SelectOption(label=label, value=str(i), description=desc))
             select = discord.ui.Select(
                 placeholder="Edit a row…",
                 options=options,
-                row=0,
+                row=1,
             )
             select.callback = self._on_row_selected
             self.add_item(select)
@@ -4157,7 +4313,7 @@ class BearHuntReviewView(discord.ui.View):
              not self.source_messages),
         ]
         for label, emoji, style, cb, disabled in row1:
-            btn = discord.ui.Button(label=label, emoji=emoji, style=style, row=1, disabled=disabled)
+            btn = discord.ui.Button(label=label, emoji=emoji, style=style, row=2, disabled=disabled)
             btn.callback = cb
             self.add_item(btn)
 
@@ -4166,7 +4322,7 @@ class BearHuntReviewView(discord.ui.View):
             ("Cancel", theme.deniedIcon, discord.ButtonStyle.secondary, self._on_cancel),
         ]
         for label, emoji, style, cb in row2:
-            btn = discord.ui.Button(label=label, emoji=emoji, style=style, row=2)
+            btn = discord.ui.Button(label=label, emoji=emoji, style=style, row=3)
             btn.callback = cb
             self.add_item(btn)
 
@@ -4175,20 +4331,20 @@ class BearHuntReviewView(discord.ui.View):
             prev_btn = discord.ui.Button(
                 label="Prev", emoji=theme.prevIcon,
                 style=discord.ButtonStyle.secondary,
-                row=3, disabled=(self.page == 0),
+                row=4, disabled=(self.page == 0),
             )
             prev_btn.callback = self._on_prev
             self.add_item(prev_btn)
             page_label = discord.ui.Button(
                 label=f"Page {self.page + 1}/{total_pages}",
                 style=discord.ButtonStyle.secondary,
-                row=3, disabled=True,
+                row=4, disabled=True,
             )
             self.add_item(page_label)
             next_btn = discord.ui.Button(
                 label="Next", emoji=theme.nextIcon,
                 style=discord.ButtonStyle.secondary,
-                row=3, disabled=(self.page >= total_pages - 1),
+                row=4, disabled=(self.page >= total_pages - 1),
             )
             next_btn.callback = self._on_next
             self.add_item(next_btn)
@@ -4233,6 +4389,14 @@ class BearHuntReviewView(discord.ui.View):
             )
             return
         await interaction.response.send_modal(EditRowModal(self, idx))
+
+    async def _on_slot_selected(self, interaction):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        new_slot = int(interaction.data['values'][0])
+        if new_slot != self.hunt_meta.get('hunting_trap'):
+            self._apply_slot_change(new_slot)
+        await self.refresh(interaction)
 
     async def _on_edit_header(self, interaction):
         if not await check_interaction_user(interaction, self.original_user_id):
@@ -4594,7 +4758,8 @@ class EditHeaderModal(discord.ui.Modal):
             label="Date (YYYY-MM-DD)", default=meta['date'] or "", max_length=10,
         )
         self.trap_input = discord.ui.TextInput(
-            label="Hunting Trap (1 or 2)",
+            label=f"Trap slot (1-{MAX_TRAPS})",
+            placeholder="1-2 = main; 3-4 = extra/farm-time traps",
             default=str(meta['hunting_trap']) if meta['hunting_trap'] else "",
             max_length=2,
         )
@@ -4628,9 +4793,11 @@ class EditHeaderModal(discord.ui.Modal):
             return
         try:
             trap = int(self.trap_input.value)
+            if not 1 <= trap <= MAX_TRAPS:
+                raise ValueError
         except Exception:
             await interaction.response.send_message(
-                f"{theme.deniedIcon} Hunting Trap must be a whole number.", ephemeral=True,
+                f"{theme.deniedIcon} Trap slot must be 1-{MAX_TRAPS}.", ephemeral=True,
             )
             return
         rallies = None
@@ -4650,6 +4817,8 @@ class EditHeaderModal(discord.ui.Modal):
                 ephemeral=True,
             )
             return
+        old_trap = self.review_view.hunt_meta.get('hunting_trap')
+        old_date = self.review_view.hunt_meta.get('date')
         self.review_view.hunt_meta = {
             'date': date_norm,
             'hunting_trap': trap,
@@ -4657,6 +4826,11 @@ class EditHeaderModal(discord.ui.Modal):
             'total_damage': bear_damage(self.total_input.value),
             'event_time': event_time,
         }
+        # Keep the edit-in-place target and rows honest when the slot/date move.
+        if trap != old_trap:
+            self.review_view._apply_slot_change(trap)
+        elif date_norm != old_date:
+            self.review_view._recheck_existing()
         await self.review_view.refresh(interaction)
 
 
@@ -4815,8 +4989,8 @@ def _bear_viewer_embed() -> discord.Embed:
             f"Pick an alliance to load its damage chart.\n\n"
             f"**Controls**\n"
             f"{theme.upperDivider}\n"
-            f"{theme.bearTrapIcon} **Trap 1 / Trap 2 / Both**\n"
-            f"└ Choose which trap to chart\n\n"
+            f"{theme.bearTrapIcon} **Trap slots / All Traps**\n"
+            f"└ Choose which trap to chart (slots 3-4 are extra/farm-time traps)\n\n"
             f"{theme.calendarIcon} **Time Range**\n"
             f"└ Set the chart date window (default: last 3 months)\n\n"
             f"{theme.medalIcon} **Top Players**\n"
@@ -4865,6 +5039,20 @@ class BearMenuView(discord.ui.View):
         await safe_edit_message(
             interaction, embed=view._build_embed(), view=view, content=None,
         )
+
+    @discord.ui.button(label="Farm Alliance", style=discord.ButtonStyle.success, emoji=theme.membersIcon, row=1)
+    async def farm_alliance(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        is_admin, _ = PermissionManager.is_admin(interaction.user.id)
+        if not is_admin:
+            await interaction.response.send_message(
+                f"{theme.deniedIcon} You need admin permissions to link a farm alliance.",
+                ephemeral=True
+            )
+            return
+        view = BearFarmLinkView(cog=self.cog, original_user_id=self.original_user_id)
+        await safe_edit_message(interaction, embed=view._build_embed(), view=view, content=None)
 
     @discord.ui.button(label="Settings", style=discord.ButtonStyle.secondary, emoji=theme.settingsIcon, row=2)
     async def settings(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -4955,6 +5143,121 @@ def build_alliance_options(alliance_conn) -> list[discord.SelectOption]:
     return [discord.SelectOption(label=name, value=str(aid)) for aid, name in rows]
 
 
+class BearFarmLinkView(discord.ui.View):
+    """Link an optional farm/academy alliance to a main alliance so the farm's
+    roster becomes a fallback match pool for the main alliance's bear OCR. Damage
+    still rolls up to the main alliance."""
+
+    def __init__(self, cog, original_user_id):
+        super().__init__(timeout=7200)
+        self.cog = cog
+        self.original_user_id = original_user_id
+        self.main_alliance_id = None
+        self._build_components()
+
+    def _alliance_name(self, alliance_id):
+        row = self.cog.alliance_cursor.execute(
+            "SELECT name FROM alliance_list WHERE alliance_id = ?", (alliance_id,)).fetchone()
+        return row[0] if row else f"ID {alliance_id}"
+
+    def _build_embed(self):
+        lines = [
+            "Match extra farm/alt-time trap accounts against a second alliance so "
+            "their bear damage still counts for the main alliance. The main roster "
+            "is always matched first; the farm roster only fills in names it misses.",
+            "",
+        ]
+        if self.main_alliance_id is None:
+            lines.append("Pick a **main alliance** to see or set its farm link.")
+        else:
+            farm_id = get_farm_link(self.main_alliance_id)
+            farm_txt = self._alliance_name(farm_id) if farm_id else "*none*"
+            lines.append(f"**Main:** {self._alliance_name(self.main_alliance_id)}")
+            lines.append(f"**Farm:** {farm_txt}")
+            lines.append("")
+            lines.append("Pick a **farm alliance** to link, or **Clear link** to remove it.")
+        return discord.Embed(
+            title=f"{theme.membersIcon} Bear Farm Alliance",
+            description="\n".join(lines),
+            color=theme.emColor1,
+        )
+
+    def _build_components(self):
+        self.clear_items()
+        options = build_alliance_options(self.cog.alliance_conn)
+
+        main_opts = [discord.SelectOption(
+            label=o.label, value=o.value,
+            default=(self.main_alliance_id is not None and int(o.value) == self.main_alliance_id))
+            for o in options]
+        main_select = discord.ui.Select(
+            placeholder="Main alliance…",
+            options=main_opts or [discord.SelectOption(label="No alliances", value="__none__")],
+            row=0)
+        main_select.callback = self._on_main
+        self.add_item(main_select)
+
+        if self.main_alliance_id is not None:
+            cur_farm = get_farm_link(self.main_alliance_id)
+            farm_opts = [discord.SelectOption(
+                label=o.label, value=o.value,
+                default=(cur_farm is not None and int(o.value) == cur_farm))
+                for o in options if int(o.value) != self.main_alliance_id]
+            farm_select = discord.ui.Select(
+                placeholder="Farm alliance…",
+                options=farm_opts or [discord.SelectOption(label="No other alliances", value="__none__")],
+                row=1, disabled=not farm_opts)
+            farm_select.callback = self._on_farm
+            self.add_item(farm_select)
+
+            clear_btn = discord.ui.Button(
+                label="Clear link", emoji=theme.trashIcon,
+                style=discord.ButtonStyle.danger, row=2, disabled=(cur_farm is None))
+            clear_btn.callback = self._on_clear
+            self.add_item(clear_btn)
+
+        back_btn = discord.ui.Button(
+            label="Back", emoji=theme.backIcon, style=discord.ButtonStyle.secondary, row=2)
+        back_btn.callback = self._on_back
+        self.add_item(back_btn)
+
+    async def _refresh(self, interaction):
+        self._build_components()
+        await safe_edit_message(interaction, embed=self._build_embed(), view=self, content=None)
+
+    async def _on_main(self, interaction):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        val = interaction.data['values'][0]
+        if val == "__none__":
+            return
+        mid = int(val)
+        if not await self.cog.check_bear_permission(interaction, mid, "manage"):
+            return
+        self.main_alliance_id = mid
+        await self._refresh(interaction)
+
+    async def _on_farm(self, interaction):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        val = interaction.data['values'][0]
+        if val == "__none__":
+            return
+        set_farm_link(self.main_alliance_id, int(val))
+        await self._refresh(interaction)
+
+    async def _on_clear(self, interaction):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        clear_farm_link(self.main_alliance_id)
+        await self._refresh(interaction)
+
+    async def _on_back(self, interaction):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        await self.cog.show_bear_track_menu(interaction)
+
+
 # ---------------------------------------------------------------------------
 # BearDamageView — view damage graph with filters
 # ---------------------------------------------------------------------------
@@ -5017,11 +5320,16 @@ class BearDamageView(discord.ui.View):
             opt.default = (int(opt.value) == (self.alliance_id or 0))
         self.add_item(AllianceSelect(self, options, action="view"))
 
-        trap_buttons = [
-            (1, f"Trap 1", theme.bearTrapIcon),
-            (2, f"Trap 2", theme.bearTrapIcon),
-            ('both', "Both", theme.chartIcon),
-        ]
+        # Only show a button per trap slot that actually has data; a lone slot
+        # needs no "All Traps" toggle. Snap the selection to a real slot so the
+        # default (1) doesn't render an empty chart for an alliance with no trap 1.
+        real_slots = alliance_trap_slots(self.alliance_id)
+        slots = real_slots or [1, 2]
+        if isinstance(self.hunting_trap, int) and real_slots and self.hunting_trap not in real_slots:
+            self.hunting_trap = real_slots[0]
+        trap_buttons = [(s, f"Trap {s}", theme.bearTrapIcon) for s in slots]
+        if len(slots) > 1:
+            trap_buttons.append(('both', "All Traps", theme.chartIcon))
         for trap, label, emoji in trap_buttons:
             btn = discord.ui.Button(
                 label=label,
@@ -5033,12 +5341,12 @@ class BearDamageView(discord.ui.View):
             btn.callback = self._make_trap_cb(trap)
             self.add_item(btn)
 
-        # Time Range sits on the trap row (row 1) to keep row 2 short.
+        # Time Range moves to row 2: up to 4 traps + All Traps fill row 1.
         has_alliance = self.alliance_id is not None
         range_btn = discord.ui.Button(
             label=f"Time Range: {self._range_label()}",
             emoji=theme.calendarIcon,
-            style=discord.ButtonStyle.secondary, row=1,
+            style=discord.ButtonStyle.secondary, row=2,
         )
         range_btn.callback = self._on_time_range
         self.add_item(range_btn)
@@ -5146,7 +5454,7 @@ class BearDamageView(discord.ui.View):
             to_date=to_str,
         )
         if not embed:
-            trap_label = "Both traps" if self.hunting_trap == 'both' else f"Trap {self.hunting_trap}"
+            trap_label = "All Traps" if self.hunting_trap == 'both' else f"Trap {self.hunting_trap}"
             empty = discord.Embed(
                 title=f"{theme.warnIcon} No data for this range",
                 description=(
@@ -5684,7 +5992,9 @@ class RecordEditModal(discord.ui.Modal):
             label="Date", default=parent_view.date or ""
         )
         self.hunting_trap_input = discord.ui.TextInput(
-            label="Hunting Trap", default=str(parent_view.hunting_trap or "")
+            label=f"Trap slot (1-{MAX_TRAPS})",
+            placeholder="1-2 = main; 3-4 = extra/farm-time traps",
+            default=str(parent_view.hunting_trap or ""),
         )
         self.rallies_input = discord.ui.TextInput(
             label="Rallies", default=str(parent_view.rallies or "")
@@ -5711,11 +6021,11 @@ class RecordEditModal(discord.ui.Modal):
 
         try:
             new_trap = int(self.hunting_trap_input.value)
-            if new_trap not in (1, 2):
+            if not 1 <= new_trap <= MAX_TRAPS:
                 raise ValueError
         except Exception:
             await interaction.response.send_message(
-                f"{theme.deniedIcon} Hunting Trap must be 1 or 2.", ephemeral=True
+                f"{theme.deniedIcon} Trap slot must be 1-{MAX_TRAPS}.", ephemeral=True
             )
             return
 
@@ -5882,7 +6192,8 @@ def _aggregate_leaderboard(cur, *, alliance_id, hunting_trap, from_date, to_date
 # or confirm an unknown ID against the alliance's kingdom and offer to add them.
 # ---------------------------------------------------------------------------
 
-def _write_match_to_row(view, *, row_id, fid, nick, damage, rank, raw_name=None):
+def _write_match_to_row(view, *, row_id, fid, nick, damage, rank, raw_name=None,
+                        matched_source=None):
     """Persist a player match. If another row in the hunt already holds this fid,
     that row is freed back to unmatched first (the match 'moves' to this row).
     row_id=None inserts a new row instead of updating. When `raw_name` is given,
@@ -5894,7 +6205,8 @@ def _write_match_to_row(view, *, row_id, fid, nick, damage, rank, raw_name=None)
             if i != row_id and r.get("fid") == fid:
                 r.update({"fid": None, "nickname": None, "status": "none"})
         match = {"fid": fid, "nickname": nick, "damage": damage, "rank": rank,
-                 "candidates": [(fid, nick, 100)], "status": "manual"}
+                 "candidates": [(fid, nick, 100)], "status": "manual",
+                 "matched_source": matched_source}
         if row_id is not None and row_id < len(rows):
             rows[row_id].update(match)
         else:
@@ -5989,6 +6301,16 @@ async def _resolve_and_apply(interaction, view, *, row_id, text, damage, rank, r
         other = view.cog.users_cursor.execute(
             "SELECT nickname, alliance FROM users WHERE fid = ?", (fid,)).fetchone()
         if other and other[1] and str(other[1]) != str(view.alliance_id):
+            # A member of the linked farm alliance is allowed here (rolls up to main).
+            if str(other[1]) == str(get_farm_link(view.alliance_id)):
+                if _write_match_to_row(view, row_id=row_id, fid=fid, nick=other[0],
+                                       damage=damage, rank=rank, raw_name=raw_name,
+                                       matched_source='farm'):
+                    await view.refresh(interaction)
+                else:
+                    await interaction.response.send_message(
+                        f"{theme.deniedIcon} Failed to update row.", ephemeral=True)
+                return
             arow = view.cog.alliance_cursor.execute(
                 "SELECT name FROM alliance_list WHERE alliance_id = ?", (other[1],)).fetchone()
             other_alliance = f"**{arow[0]}**" if arow else f"ID `{other[1]}`"
@@ -6267,7 +6589,7 @@ class BearLeaderboardView(discord.ui.View):
         return max(1, -(-len(self.entries) // self.PAGE_SIZE))
 
     def build_embed(self) -> discord.Embed:
-        trap_label = "Both Traps" if self.hunting_trap == 'both' else f"Trap {self.hunting_trap}"
+        trap_label = "All Traps" if self.hunting_trap == 'both' else f"Trap {self.hunting_trap}"
         rng = f"{self.from_date} → {self.to_date}" if (self.from_date and self.to_date) else "All time"
         embed = discord.Embed(
             title=f"{theme.medalIcon} Top Players · {self.alliance_name} · {trap_label}",
@@ -6396,8 +6718,17 @@ class PlayerHistoryView(discord.ui.View):
         self.alliance_id = alliance_id
         self.alliance_name = alliance_name
         self.fid = fid
-        # History defaults to a single trap; 'both' overlays the two series.
-        self.hunting_trap = hunting_trap if hunting_trap in (1, 2, '1', '2') else 'both'
+        # History defaults to a single trap; 'both' overlays every series. Snap the
+        # requested slot to one the player actually has data in.
+        self._trap_slots = player_trap_slots(alliance_id, fid)
+        try:
+            ht = int(hunting_trap)
+            ht = ht if 1 <= ht <= MAX_TRAPS else None
+        except (TypeError, ValueError):
+            ht = None
+        if ht is None or (self._trap_slots and ht not in self._trap_slots):
+            ht = 'both' if len(self._trap_slots) > 1 else (self._trap_slots[0] if self._trap_slots else 1)
+        self.hunting_trap = ht
         self.parent_view = parent_view
         self.nickname = str(fid)
         self.records: list = []
@@ -6421,7 +6752,10 @@ class PlayerHistoryView(discord.ui.View):
 
     def _build_components(self):
         self.clear_items()
-        for trap, label in ((1, "Trap 1"), (2, "Trap 2"), ('both', "Both")):
+        trap_buttons = [(s, f"Trap {s}") for s in self._trap_slots]
+        if len(self._trap_slots) > 1:
+            trap_buttons.append(('both', "All Traps"))
+        for trap, label in trap_buttons:
             btn = discord.ui.Button(
                 label=label, row=0,
                 style=(discord.ButtonStyle.success if self.hunting_trap == trap
@@ -6434,7 +6768,7 @@ class PlayerHistoryView(discord.ui.View):
         self.add_item(back_btn)
 
     def build(self):
-        trap_label = "Both Traps" if self.hunting_trap == 'both' else f"Trap {self.hunting_trap}"
+        trap_label = "All Traps" if self.hunting_trap == 'both' else f"Trap {self.hunting_trap}"
         embed = discord.Embed(
             title=f"{theme.chartIcon} {_isolate_rtl(self.nickname)} · {trap_label} History",
             color=theme.emColor1)
@@ -6464,7 +6798,7 @@ class PlayerHistoryView(discord.ui.View):
         # Chart: one series per trap when 'both', else a single line.
         if self.hunting_trap == 'both':
             series = []
-            for t in (1, 2):
+            for t in self._trap_slots:
                 pts = [(datetime.strptime(r[0], "%Y-%m-%d"), int(r[2]))
                        for r in self.records if r[1] == t]
                 if pts:
@@ -7709,7 +8043,7 @@ class DataSubmit:
 
     async def _process_view_combined(self, *, alliance_id, alliance_name,
                                      from_date, to_date):
-        """Both-traps render: pull each trap's series, drop empty ones,
+        """All-traps render: pull each trap's series, drop empty ones,
         defer to combined embed builder."""
         try:
             from_dt = datetime.strptime(from_date, "%Y-%m-%d").date() if from_date else None
@@ -7720,7 +8054,7 @@ class DataSubmit:
             return None, None
 
         trap_series = []
-        for trap in (1, 2):
+        for trap in alliance_trap_slots(alliance_id):
             self.bear_cursor.execute(
                 "SELECT date, rallies, total_damage FROM bear_hunts "
                 "WHERE alliance_id = ? AND hunting_trap = ? ORDER BY date ASC",

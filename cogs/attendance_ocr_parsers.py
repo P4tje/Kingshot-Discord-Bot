@@ -1513,8 +1513,12 @@ def _bear_session_id(hunt_id) -> str:
 
 
 def _bear_trap_label(hunting_trap) -> str:
-    return {1: "Trap 1", 2: "Trap 2", 3: "Both Traps"}.get(
-        int(hunting_trap), f"Trap {hunting_trap}")
+    # Per-hunt sync always gets a single logical slot (1-4); 3/4 are extra/farm
+    # traps, not "Both". Never render a combined label here.
+    try:
+        return f"Trap {int(hunting_trap)}"
+    except (TypeError, ValueError):
+        return f"Trap {hunting_trap}"
 
 
 def sync_bear_attendance_event(*, alliance_id, hunt_id, date, hunting_trap,
