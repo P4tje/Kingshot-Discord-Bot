@@ -365,6 +365,15 @@ def flag_state_mismatch(fid):
         conn.commit()
 
 
+def flag_state_mismatch_many(fids):
+    """Mark the state on file for every fid as rejected by the game, in one transaction."""
+    flagged_at = datetime.now().isoformat(timespec='seconds')
+    with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
+        conn.executemany("UPDATE users SET state_mismatch_at = ? WHERE fid = ?",
+                         [(flagged_at, fid) for fid in fids])
+        conn.commit()
+
+
 def clear_state_mismatch(fid):
     """Drop the wrong-state flag without touching the stored state."""
     with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:

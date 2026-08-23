@@ -1361,10 +1361,17 @@ async def _notify_state_resolve_done(cog, scope, details):
         cog.logger.exception(f"GiftOps: could not DM the state resolution result: {e}")
 
 
+# An alliance losing this share of its roster in one run is far more likely to be an
+# upstream fault than a real exodus, so hold the removals back and flag instead.
+AUTO_REMOVE_MAX_SHARE = 0.20
+AUTO_REMOVE_MIN_TO_GUARD = 3
+
+
 async def maybe_remove_transferred_member(cog, fid, collector=None):
-    """Remove a member who transferred out of their single-kingdom alliance, if it opted in
-    (auto_remove_on_transfer). Pass `collector` during a bulk run to batch the notices."""
-    def _remove():
+    """Record a member who transferred out of their single-kingdom alliance, if it opted in
+    (auto_remove_on_transfer). Nothing is deleted here; apply_removals decides. Pass
+    `collector` during a bulk run to batch the notices."""
+    def _candidate():
         with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
             row = conn.execute(
                 "SELECT alliance, nickname FROM users WHERE fid = ?", (fid,)).fetchone()
@@ -1380,21 +1387,96 @@ async def maybe_remove_transferred_member(cog, fid, collector=None):
                 ).fetchone()
             if not (srow and srow[0]):
                 return None
-            conn.execute("DELETE FROM users WHERE fid = ?", (fid,))
-            conn.commit()
             return alliance_id, (row[1] or str(fid))
 
-    removed = await asyncio.to_thread(_remove)
-    if removed is None:
+    found = await asyncio.to_thread(_candidate)
+    if found is None:
         return False
-    alliance_id, nickname = removed
-
-    cog.logger.info(f"GiftOps: auto-removed FID {fid} from alliance {alliance_id} (transferred out of its state)")
+    alliance_id, nickname = found
     if collector is not None:
         collector.append((alliance_id, fid, nickname))
         return True
-    await post_removal_summary(cog, [(alliance_id, fid, nickname)])
+    await apply_removals(cog, [(alliance_id, fid, nickname)])
     return True
+
+
+async def apply_removals(cog, candidates):
+    """Delete the collected transfer candidates, one decision per alliance. An alliance that
+    would lose more than AUTO_REMOVE_MAX_SHARE of its roster keeps every member; they are
+    flagged wrong-kingdom instead, so a bad API run cannot empty a roster."""
+    by_alliance = {}
+    for alliance_id, fid, nickname in candidates:
+        by_alliance.setdefault(alliance_id, []).append((fid, nickname))
+
+    def _roster_size(alliance_id):
+        with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM users WHERE alliance = ?", (alliance_id,)).fetchone()[0]
+
+    def _delete(fids):
+        with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
+            conn.executemany("DELETE FROM users WHERE fid = ?", [(f,) for f in fids])
+            conn.commit()
+
+    removed = []
+    for alliance_id, members in by_alliance.items():
+        if len(members) >= AUTO_REMOVE_MIN_TO_GUARD:
+            roster = await asyncio.to_thread(_roster_size, alliance_id)
+            if roster and len(members) / roster > AUTO_REMOVE_MAX_SHARE:
+                await asyncio.to_thread(gift_state_resolver.flag_state_mismatch_many,
+                                        [f for f, _ in members])
+                cog.logger.warning(
+                    f"GiftOps: auto-removal held back for alliance {alliance_id}: {len(members)} of "
+                    f"{roster} members looked transferred ({len(members) / roster:.0%}); "
+                    f"flagged wrong kingdom instead")
+                print(f"Auto-removal held back for alliance {alliance_id}: {len(members)}/{roster} members")
+                await post_removal_blocked(cog, alliance_id, len(members), roster)
+                continue
+        await asyncio.to_thread(_delete, [f for f, _ in members])
+        for fid, nickname in members:
+            cog.logger.info(
+                f"GiftOps: auto-removed FID {fid} from alliance {alliance_id} (transferred out of its kingdom)")
+            removed.append((alliance_id, fid, nickname))
+
+    if removed:
+        await post_removal_summary(cog, removed)
+
+
+def _alliance_log_channel(cog, alliance_id):
+    """The alliance's log channel object, or None when unset or unreachable."""
+    try:
+        with sqlite3.connect('db/settings.sqlite', timeout=30.0) as conn:
+            row = conn.execute(
+                "SELECT channel_id FROM alliance_logs WHERE alliance_id = ?", (alliance_id,)
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return cog.bot.get_channel(int(row[0])) if row and row[0] else None
+
+
+async def post_removal_blocked(cog, alliance_id, flagged, roster):
+    """Tell the alliance's log channel that a mass auto-removal was held back."""
+    try:
+        channel = _alliance_log_channel(cog, alliance_id)
+        if channel is None:
+            return
+        embed = discord.Embed(
+            title=f"{theme.warnIcon} Auto-removal Held Back",
+            description=(
+                f"{flagged} of {roster} members looked like they had left this alliance's "
+                f"kingdom during the last redemption, so nobody was removed.\n"
+                f"{theme.upperDivider}\n"
+                f"That many at once usually means the Gift Redemption API was misreporting, "
+                f"not that your alliance emptied. The members are flagged instead, so you can "
+                f"check them under **Member States -> Wrong States** and clear them from there "
+                f"if the transfers were real.\n{theme.lowerDivider}"
+            ),
+            color=theme.emColor1,
+        )
+        await channel.send(embed=embed)
+    except Exception as e:
+        cog.logger.warning(
+            f"GiftOps: could not post auto-removal warning for alliance {alliance_id}: {e}")
 
 
 async def post_removal_summary(cog, removals):
@@ -1405,13 +1487,7 @@ async def post_removal_summary(cog, removals):
 
     for alliance_id, members in by_alliance.items():
         try:
-            with sqlite3.connect('db/settings.sqlite', timeout=30.0) as conn:
-                crow = conn.execute(
-                    "SELECT channel_id FROM alliance_logs WHERE alliance_id = ?", (alliance_id,)
-                ).fetchone()
-            if not (crow and crow[0]):
-                continue
-            channel = cog.bot.get_channel(int(crow[0]))
+            channel = _alliance_log_channel(cog, alliance_id)
             if channel is None:
                 continue
             listed = _summary_names_block(
@@ -2243,7 +2319,7 @@ async def use_giftcode_for_alliance(cog, alliance_id, giftcode, process=None):
                     batch_process_alliance_results(cog, batch_results)
                     batch_results = []
                 if removals:
-                    await post_removal_summary(cog, removals)
+                    await apply_removals(cog, removals)
                     removals = []
                 raise PreemptedException()
 
@@ -2524,7 +2600,7 @@ async def use_giftcode_for_alliance(cog, alliance_id, giftcode, process=None):
             batch_results = []
 
         if removals:
-            await post_removal_summary(cog, removals)
+            await apply_removals(cog, removals)
             removals = []
 
         # Opt-in per-alliance summary embed after the run.
@@ -2541,9 +2617,9 @@ async def use_giftcode_for_alliance(cog, alliance_id, giftcode, process=None):
         cog.logger.exception(f"GiftOps: UNEXPECTED ERROR in use_giftcode_for_alliance for {alliance_id}/{giftcode}: {str(e)}")
         cog.logger.exception(f"Traceback: {traceback.format_exc()}")
         try:
-            # Members were already deleted, so report them even though the run died.
+            # Apply the removals collected before the run failed.
             if locals().get('removals'):
-                await post_removal_summary(cog, removals)
+                await apply_removals(cog, removals)
         except Exception: pass
         try:
             if 'channel' in locals() and channel: await channel.send(f"{theme.warnIcon} An unexpected error occurred processing `{giftcode}` for {alliance_name}.")
