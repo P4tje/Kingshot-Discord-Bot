@@ -4,6 +4,7 @@ Database backup and restore system. Manages scheduled and manual backups.
 import discord
 from discord.ext import commands, tasks
 import sqlite3
+from contextlib import closing
 import os
 import zipfile
 import datetime
@@ -67,7 +68,7 @@ class BackupOperations(commands.Cog):
         conn.close()
 
     def get_settings(self) -> dict:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute("SELECT * FROM backup_settings WHERE id = 1").fetchone()
         if not row:
@@ -78,7 +79,7 @@ class BackupOperations(commands.Cog):
         if not kwargs:
             return
         cols = ", ".join(f"{k} = ?" for k in kwargs)
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 f"UPDATE backup_settings SET {cols} WHERE id = 1",
                 list(kwargs.values()),
@@ -177,7 +178,7 @@ class BackupOperations(commands.Cog):
                 except ValueError:
                     pass
 
-            with sqlite3.connect("db/settings.sqlite") as conn:
+            with closing(sqlite3.connect("db/settings.sqlite")) as conn, conn:
                 global_admins = conn.execute(
                     "SELECT id FROM admin WHERE is_initial = 1"
                 ).fetchall()

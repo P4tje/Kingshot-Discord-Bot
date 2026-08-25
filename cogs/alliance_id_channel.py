@@ -77,7 +77,7 @@ def render_info_message(alliance_id, alliance_name):
 
 def info_settings(alliance_id):
     """(post, pin) for an alliance's ID channel info message."""
-    with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
+    with closing(sqlite3.connect('db/alliance.sqlite', timeout=30.0)) as conn, conn:
         row = conn.execute(
             "SELECT COALESCE(id_post_info_message, 0), COALESCE(id_pin_info_message, 1) "
             "FROM alliancesettings WHERE alliance_id = ?", (alliance_id,)).fetchone()
@@ -85,7 +85,7 @@ def info_settings(alliance_id):
 
 
 def set_info_settings(alliance_id, *, post=None, pin=None):
-    with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
+    with closing(sqlite3.connect('db/alliance.sqlite', timeout=30.0)) as conn, conn:
         conn.execute(
             "INSERT OR IGNORE INTO alliancesettings (alliance_id, channel_id, interval) "
             "VALUES (?, NULL, 0)", (alliance_id,))
@@ -100,7 +100,7 @@ def set_info_settings(alliance_id, *, post=None, pin=None):
 
 def channel_row_for_alliance(guild_id, alliance_id):
     """(channel_id, info_message_id) for an alliance's ID channel, or None."""
-    with sqlite3.connect('db/id_channel.sqlite', timeout=30.0) as conn:
+    with closing(sqlite3.connect('db/id_channel.sqlite', timeout=30.0)) as conn, conn:
         return conn.execute(
             "SELECT channel_id, info_message_id FROM id_channels "
             "WHERE guild_id = ? AND alliance_id = ?", (guild_id, alliance_id)).fetchone()
@@ -108,7 +108,7 @@ def channel_row_for_alliance(guild_id, alliance_id):
 
 def channel_rows_for_guild(guild_id):
     """[(channel_id, alliance_id, info_message_id), ...] for every ID channel in a guild."""
-    with sqlite3.connect('db/id_channel.sqlite', timeout=30.0) as conn:
+    with closing(sqlite3.connect('db/id_channel.sqlite', timeout=30.0)) as conn, conn:
         return conn.execute(
             "SELECT channel_id, alliance_id, info_message_id FROM id_channels "
             "WHERE guild_id = ?", (guild_id,)).fetchall()
@@ -116,13 +116,13 @@ def channel_rows_for_guild(guild_id):
 
 def all_channel_rows():
     """[(channel_id, alliance_id, info_message_id), ...] across every guild."""
-    with sqlite3.connect('db/id_channel.sqlite', timeout=30.0) as conn:
+    with closing(sqlite3.connect('db/id_channel.sqlite', timeout=30.0)) as conn, conn:
         return conn.execute(
             "SELECT channel_id, alliance_id, info_message_id FROM id_channels").fetchall()
 
 
 def set_info_message_id(channel_id, message_id):
-    with sqlite3.connect('db/id_channel.sqlite', timeout=30.0) as conn:
+    with closing(sqlite3.connect('db/id_channel.sqlite', timeout=30.0)) as conn, conn:
         conn.execute("UPDATE id_channels SET info_message_id = ? WHERE channel_id = ?",
                      (message_id, channel_id))
         conn.commit()
@@ -202,7 +202,7 @@ class AllianceIDChannel(commands.Cog):
             'delete_after': 10,
             'respond_to_invalid': 0,
         }
-        with sqlite3.connect('db/id_channel.sqlite') as db:
+        with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
             db.row_factory = sqlite3.Row
             cursor = db.cursor()
             cursor.execute("SELECT * FROM id_channel_settings WHERE guild_id = ?", (guild_id,))
@@ -217,7 +217,7 @@ class AllianceIDChannel(commands.Cog):
         return result
 
     def ensure_guild_settings(self, guild_id):
-        with sqlite3.connect('db/id_channel.sqlite') as db:
+        with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
             cursor = db.cursor()
             cursor.execute("INSERT OR IGNORE INTO id_channel_settings (guild_id) VALUES (?)", (guild_id,))
             db.commit()
@@ -340,7 +340,7 @@ class AllianceIDChannel(commands.Cog):
                 logger.error(f"ID channel info refresh failed for {channel_id}: {e}")
 
     def _alliance_name(self, alliance_id):
-        with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
+        with closing(sqlite3.connect('db/alliance.sqlite', timeout=30.0)) as conn, conn:
             row = conn.execute("SELECT name FROM alliance_list WHERE alliance_id = ?",
                                (alliance_id,)).fetchone()
         return row[0] if row else "this alliance"
@@ -408,7 +408,7 @@ class AllianceIDChannel(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         try:
-            with sqlite3.connect('db/id_channel.sqlite') as db:
+            with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
                 cursor = db.cursor()
                 cursor.execute("SELECT channel_id, alliance_id, guild_id FROM id_channels")
                 channels = cursor.fetchall()
@@ -443,7 +443,7 @@ class AllianceIDChannel(commands.Cog):
             await self.reconcile_info_messages()
 
             if invalid_channels:
-                with sqlite3.connect('db/id_channel.sqlite') as db:
+                with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
                     cursor = db.cursor()
                     placeholders = ','.join('?' * len(invalid_channels))
                     cursor.execute(f"""
@@ -465,7 +465,7 @@ class AllianceIDChannel(commands.Cog):
             return
 
         try:
-            with sqlite3.connect('db/id_channel.sqlite') as db:
+            with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
                 cursor = db.cursor()
                 cursor.execute("SELECT alliance_id FROM id_channels WHERE channel_id = ?", (message.channel.id,))
                 channel_info = cursor.fetchone()
@@ -493,7 +493,7 @@ class AllianceIDChannel(commands.Cog):
         delete_after = settings['delete_after']
 
         try:
-            with sqlite3.connect('db/users.sqlite') as users_db:
+            with closing(sqlite3.connect('db/users.sqlite')) as users_db, users_db:
                 cursor = users_db.cursor()
                 cursor.execute("SELECT alliance FROM users WHERE fid = ?", (fid,))
                 existing_alliance = cursor.fetchone()
@@ -505,7 +505,7 @@ class AllianceIDChannel(commands.Cog):
                         await message.reply(f"This ID ({fid}) is already registered in this alliance!", delete_after=delete_after)
                         return
 
-                    with sqlite3.connect('db/alliance.sqlite') as alliance_db:
+                    with closing(sqlite3.connect('db/alliance.sqlite')) as alliance_db, alliance_db:
                         alliance_cursor = alliance_db.cursor()
                         alliance_cursor.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (existing_alliance[0],))
                         alliance_name = alliance_cursor.fetchone()
@@ -559,7 +559,7 @@ class AllianceIDChannel(commands.Cog):
             nickname = given_name or f"Player {fid}"
             furnace_lv = given_level or 0
             try:
-                with sqlite3.connect('db/users.sqlite') as users_db:
+                with closing(sqlite3.connect('db/users.sqlite')) as users_db, users_db:
                     cursor = users_db.cursor()
                     cursor.execute("SELECT alliance FROM users WHERE fid = ?", (fid,))
                     if cursor.fetchone():
@@ -611,7 +611,7 @@ class AllianceIDChannel(commands.Cog):
     @tasks.loop(seconds=300)
     async def check_channels_loop(self):
         try:
-            with sqlite3.connect('db/id_channel.sqlite') as db:
+            with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
                 cursor = db.cursor()
                 cursor.execute("SELECT channel_id, alliance_id, guild_id FROM id_channels")
                 channels = cursor.fetchall()
@@ -658,7 +658,7 @@ class AllianceIDChannel(commands.Cog):
     async def show_id_channel_for(self, interaction: discord.Interaction, alliance_id: int):
         """Hub-context entry: show + manage the ID channel for one alliance."""
         try:
-            with sqlite3.connect('db/alliance.sqlite') as alliance_db:
+            with closing(sqlite3.connect('db/alliance.sqlite')) as alliance_db, alliance_db:
                 cursor = alliance_db.cursor()
                 cursor.execute(
                     "SELECT name FROM alliance_list WHERE alliance_id = ?",
@@ -672,7 +672,7 @@ class AllianceIDChannel(commands.Cog):
                 return
             alliance_name = row[0]
 
-            with sqlite3.connect('db/id_channel.sqlite') as db:
+            with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
                 cursor = db.cursor()
                 cursor.execute(
                     "SELECT channel_id FROM id_channels "
@@ -805,7 +805,7 @@ class ScanLimitModal(discord.ui.Modal):
                 return
 
             self.cog.ensure_guild_settings(interaction.guild_id)
-            with sqlite3.connect('db/id_channel.sqlite') as db:
+            with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
                 cursor = db.cursor()
                 cursor.execute("UPDATE id_channel_settings SET scan_limit = ? WHERE guild_id = ?",
                               (value, interaction.guild_id))
@@ -850,7 +850,7 @@ class DeleteAfterModal(discord.ui.Modal):
             db_value = None if value == 0 else value
 
             self.cog.ensure_guild_settings(interaction.guild_id)
-            with sqlite3.connect('db/id_channel.sqlite') as db:
+            with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
                 cursor = db.cursor()
                 cursor.execute("UPDATE id_channel_settings SET delete_after = ? WHERE guild_id = ?",
                               (db_value, interaction.guild_id))
@@ -905,7 +905,7 @@ class IDChannelSettingsView(discord.ui.View):
         new_value = 0 if settings['scan_enabled'] else 1
 
         self.cog.ensure_guild_settings(interaction.guild_id)
-        with sqlite3.connect('db/id_channel.sqlite') as db:
+        with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
             cursor = db.cursor()
             cursor.execute("UPDATE id_channel_settings SET scan_enabled = ? WHERE guild_id = ?",
                           (new_value, interaction.guild_id))
@@ -1021,7 +1021,7 @@ class AllianceIDChannelView(discord.ui.View):
             async def callback(self, channel_interaction: discord.Interaction):
                 selected_channel = self.values[0]
                 try:
-                    with sqlite3.connect('db/id_channel.sqlite') as db:
+                    with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
                         cursor = db.cursor()
                         cursor.execute(
                             "DELETE FROM id_channels WHERE guild_id = ? AND alliance_id = ?",
@@ -1077,7 +1077,7 @@ class AllianceIDChannelView(discord.ui.View):
                 channel_row_for_alliance, interaction.guild_id, self.alliance_id)
             if row:
                 await self.cog.remove_info_message(row[0], row[1])
-            with sqlite3.connect('db/id_channel.sqlite') as db:
+            with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
                 cursor = db.cursor()
                 cursor.execute(
                     "DELETE FROM id_channels WHERE guild_id = ? AND alliance_id = ?",
@@ -1125,7 +1125,7 @@ class IDChannelView(discord.ui.View):
     async def view_channels_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             channels = []
-            with sqlite3.connect('db/id_channel.sqlite') as db:
+            with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
                 cursor = db.cursor()
                 cursor.execute("""
                     SELECT channel_id, alliance_id, created_at, created_by
@@ -1134,7 +1134,7 @@ class IDChannelView(discord.ui.View):
                 """, (interaction.guild_id,))
                 id_channels = cursor.fetchall()
 
-            with sqlite3.connect('db/alliance.sqlite') as alliance_db:
+            with closing(sqlite3.connect('db/alliance.sqlite')) as alliance_db, alliance_db:
                 alliance_cursor = alliance_db.cursor()
                 for channel_id, alliance_id, created_at, created_by in id_channels:
                     alliance_cursor.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (alliance_id,))
@@ -1196,12 +1196,12 @@ class IDChannelView(discord.ui.View):
     async def delete_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             channels = []
-            with sqlite3.connect('db/id_channel.sqlite') as db:
+            with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
                 cursor = db.cursor()
                 cursor.execute("SELECT channel_id, alliance_id FROM id_channels WHERE guild_id = ?", (interaction.guild_id,))
                 id_channels = cursor.fetchall()
 
-            with sqlite3.connect('db/alliance.sqlite') as alliance_db:
+            with closing(sqlite3.connect('db/alliance.sqlite')) as alliance_db, alliance_db:
                 alliance_cursor = alliance_db.cursor()
                 for channel_id, alliance_id in id_channels:
                     alliance_cursor.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (alliance_id,))
@@ -1240,7 +1240,7 @@ class IDChannelView(discord.ui.View):
                     try:
                         channel_id = int(self.values[0])
 
-                        with sqlite3.connect('db/id_channel.sqlite') as db:
+                        with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
                             cursor = db.cursor()
                             cursor.execute("DELETE FROM id_channels WHERE channel_id = ?", (channel_id,))
                             db.commit()
@@ -1315,7 +1315,7 @@ class IDChannelView(discord.ui.View):
     )
     async def create_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            with sqlite3.connect('db/alliance.sqlite') as alliance_db:
+            with closing(sqlite3.connect('db/alliance.sqlite')) as alliance_db, alliance_db:
                 cursor = alliance_db.cursor()
                 cursor.execute("SELECT alliance_id, name FROM alliance_list")
                 alliances = cursor.fetchall()
@@ -1357,7 +1357,7 @@ class IDChannelView(discord.ui.View):
                             selected_channel = self.values[0]
                             
                             try:
-                                with sqlite3.connect('db/id_channel.sqlite') as db:
+                                with closing(sqlite3.connect('db/id_channel.sqlite')) as db, db:
                                     cursor = db.cursor()
                                     cursor.execute("""
                                         INSERT INTO id_channels 
