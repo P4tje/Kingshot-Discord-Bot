@@ -3,6 +3,7 @@ import sys
 import os
 import shutil
 import stat
+import re
 
 # Cap glibc malloc arenas before anything allocates: glibc keeps a per-thread
 # arena and never frees it, so OCR across many to_thread workers grows RSS until
