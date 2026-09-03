@@ -108,6 +108,8 @@ class MainMenu(commands.Cog):
                 f"{theme.upperDivider}\n"
                 f"{theme.allianceIcon} **Alliances**\n"
                 f"└ Manage alliances, members, and registration\n\n"
+                f"{theme.globeIcon} **MightPulse**\n"
+                f"└ Kingshot data integration\n\n"
                 f"{theme.giftIcon} **Gift Codes**\n"
                 f"└ Manage gift codes and rewards\n\n"
                 f"{theme.bellIcon} **Notifications**\n"
@@ -451,7 +453,7 @@ class MainMenu(commands.Cog):
 # ============================================================================
 
 class MainMenuView(discord.ui.View):
-    """Main menu with 8 category buttons."""
+    """Main menu with 9 category buttons."""
 
     def __init__(self, cog):
         super().__init__(timeout=None)
@@ -571,6 +573,27 @@ class MainMenuView(discord.ui.View):
         except Exception as e:
             logger.error(f"Error loading Minister menu: {e}")
             print(f"Error loading Minister menu: {e}")
+
+    @discord.ui.button(
+        label="MightPulse",
+        emoji=theme.globeIcon,
+        style=discord.ButtonStyle.primary,
+        custom_id="mightpulse",
+        row=1
+    )
+    async def mightpulse_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            mightpulse_cog = self.cog.bot.get_cog("Mightpulse")
+            if mightpulse_cog:
+                await mightpulse_cog.show_mightpulse_menu(interaction)
+            else:
+                await interaction.response.send_message(
+                    f"{theme.deniedIcon} MightPulse module not found.",
+                    ephemeral=True
+                )
+        except Exception as e:
+            logger.error(f"Error loading MightPulse menu: {e}")
+            print(f"Error loading MightPulse menu: {e}")
 
     @discord.ui.button(
         label="Themes",
