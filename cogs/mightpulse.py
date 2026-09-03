@@ -45,6 +45,30 @@ def save_mightpulse_api_key(api_key: str) -> None:
         )
 
 
+class MightpulseMenuView(discord.ui.View):
+    """Navigation controls for the MightPulse menu."""
+
+    def __init__(self, cog):
+        super().__init__(timeout=7200)
+        self.cog = cog
+
+    @discord.ui.button(
+        label="Main Menu",
+        emoji=theme.homeIcon,
+        style=discord.ButtonStyle.secondary,
+        custom_id="mightpulse_main_menu",
+    )
+    async def main_menu_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        main_menu = self.cog.bot.get_cog("MainMenu")
+        if main_menu:
+            await main_menu.show_main_menu(interaction)
+        else:
+            await interaction.response.send_message(
+                f"{theme.deniedIcon} Main Menu module not found.",
+                ephemeral=True,
+            )
+
+
 class Mightpulse(commands.Cog):
     """MightPulse configuration. Data endpoints will be added incrementally."""
 
@@ -64,7 +88,12 @@ class Mightpulse(commands.Cog):
             description=f"API key status: **{status}**\n\nData tools will be added here.",
             color=theme.emColor1,
         )
-        await safe_edit_message(interaction, embed=embed, view=None, content=None)
+        await safe_edit_message(
+            interaction,
+            embed=embed,
+            view=MightpulseMenuView(self),
+            content=None,
+        )
 
     @app_commands.command(name="mightpulse_set_api_key", description="Save the MightPulse API key.")
     @app_commands.describe(api_key="Your MightPulse API key")
