@@ -405,11 +405,39 @@ def has_obsolete_requirements():
         return False
 
 
+DEFAULT_GITHUB_REPOSITORY = "kingshot-project/Kingshot-Discord-Bot"
+
+
+def get_checkout_github_repository():
+    """Return the GitHub owner/repository configured as this checkout's origin."""
+    try:
+        result = subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        remote_url = result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        remote_url = ""
+
+    match = re.search(
+        r"github\.com[/:]([^/\s]+/[^/\s]+?)(?:\.git)?$",
+        remote_url,
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1)
+
+    return DEFAULT_GITHUB_REPOSITORY
+
+
 # Configuration for multiple update sources
 UPDATE_SOURCES = [
     {
         "name": "GitHub",
-        "api_url": "https://api.github.com/repos/kingshot-project/Kingshot-Discord-Bot/releases/latest",
+        "api_url": f"https://api.github.com/repos/{get_checkout_github_repository()}/releases/latest",
         "primary": True
     }
 ]
@@ -497,10 +525,11 @@ def download_requirements_from_release(beta_mode=False):
     
     # Build raw URL based on source and mode
     if source_name == "GitHub" or "GitHub" in source_name:
+        repo_name = get_checkout_github_repository()
         if beta_mode:
-            raw_url = "https://raw.githubusercontent.com/kingshot-project/Kingshot-Discord-Bot/main/requirements.txt"
+            raw_url = f"https://raw.githubusercontent.com/{repo_name}/main/requirements.txt"
         else:
-            raw_url = f"https://raw.githubusercontent.com/kingshot-project/Kingshot-Discord-Bot/refs/tags/{tag}/requirements.txt"
+            raw_url = f"https://raw.githubusercontent.com/{repo_name}/refs/tags/{tag}/requirements.txt"
     else:
         return False
 
