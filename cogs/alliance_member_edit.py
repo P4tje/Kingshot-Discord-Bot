@@ -78,6 +78,55 @@ def apply_member_edit(fid, *, nickname=None, furnace_lv=None, kid=None, alliance
     return changed
 
 
+def upsert_api_member(fid, nickname, furnace_lv, alliance_id, kid=None):
+    """Add an API member or update the existing member through the member-edit path."""
+    fid = int(fid)
+    nickname = str(nickname or f"Player {fid}").strip()
+    furnace_lv = parse_furnace_level(furnace_lv)
+    if furnace_lv is None:
+        furnace_lv = 0
+
+    with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
+        row = conn.execute(
+            "SELECT alliance FROM users WHERE fid = ?", (fid,)
+        ).fetchone()
+
+    if row:
+        changed = apply_member_edit(
+            fid,
+            nickname=nickname,
+            furnace_lv=furnace_lv,
+            kid=kid,
+        )
+        with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
+            conn.execute(
+                "UPDATE users SET alliance = ? WHERE fid = ?",
+                (str(alliance_id), fid),
+            )
+            conn.commit()
+        return False, bool(changed or str(row[0]) != str(alliance_id))
+
+    with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
+        conn.execute(
+                """INSERT INTO users (fid, nickname, furnace_lv, kid, stove_lv_content, alliance)
+                    VALUES (?, ?, ?, ?, NULL, ?)""",
+                (fid, nickname, furnace_lv, kid, str(alliance_id)),
+        )
+        conn.commit()
+    return True, True
+
+
+def remove_member_from_alliance(fid, alliance_id):
+    """Remove a member from an alliance while preserving their user record."""
+    with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
+        cursor = conn.execute(
+            "UPDATE users SET alliance = NULL WHERE fid = ? AND alliance = ?",
+            (int(fid), str(alliance_id)),
+        )
+        conn.commit()
+    return cursor.rowcount > 0
+
+
 def enqueue_catchups(bot, fids):
     """Queue owed-code redemption for members whose state just changed; returns how many."""
     fids = list(dict.fromkeys(fids))

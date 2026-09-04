@@ -512,6 +512,27 @@ class MainMenuView(discord.ui.View):
             print(f"Error loading Notifications menu: {e}")
 
     @discord.ui.button(
+        label="MightPulse",
+        emoji=theme.globeIcon,
+        style=discord.ButtonStyle.primary,
+        custom_id="mightpulse",
+        row=0
+    )
+    async def mightpulse_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            mightpulse_cog = self.cog.bot.get_cog("Mightpulse")
+            if mightpulse_cog:
+                await mightpulse_cog.show_mightpulse_menu(interaction)
+            else:
+                await interaction.response.send_message(
+                    f"{theme.deniedIcon} MightPulse module not found.",
+                    ephemeral=True
+                )
+        except Exception as e:
+            logger.error(f"Error loading MightPulse menu: {e}")
+            print(f"Error loading MightPulse menu: {e}")
+
+    @discord.ui.button(
         label="Attendance",
         emoji=theme.listIcon,
         style=discord.ButtonStyle.primary,
@@ -573,27 +594,6 @@ class MainMenuView(discord.ui.View):
         except Exception as e:
             logger.error(f"Error loading Minister menu: {e}")
             print(f"Error loading Minister menu: {e}")
-
-    @discord.ui.button(
-        label="MightPulse",
-        emoji=theme.globeIcon,
-        style=discord.ButtonStyle.primary,
-        custom_id="mightpulse",
-        row=1
-    )
-    async def mightpulse_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            mightpulse_cog = self.cog.bot.get_cog("Mightpulse")
-            if mightpulse_cog:
-                await mightpulse_cog.show_mightpulse_menu(interaction)
-            else:
-                await interaction.response.send_message(
-                    f"{theme.deniedIcon} MightPulse module not found.",
-                    ephemeral=True
-                )
-        except Exception as e:
-            logger.error(f"Error loading MightPulse menu: {e}")
-            print(f"Error loading MightPulse menu: {e}")
 
     @discord.ui.button(
         label="Themes",
